@@ -1,0 +1,169 @@
+"""전체 근거(P1)와 간결한 심의 입력(P3)을 만든다."""
+from __future__ import annotations
+
+import copy
+import re
+from typing import Any
+
+
+P1_VERSION = "nh-ad-parse-evidence-v3"
+P3_VERSION = "nh-ad-region-review-input-v5"
+
+
+def build_p1(document: dict[str, Any]) -> dict[str, Any]:
+    """모든 OCR/PDF/VLM 관측과 후처리 근거를 보존한다."""
+    evidence = copy.deepcopy(document)
+    evidence["contract"] = {
+        "version": P1_VERSION,
+        "purpose": "OCR/PDF/VLM 관측과 정확한 페이지 bbox 보존",
+        "bbox_policy": "OCR/PDF/레이아웃 좌표만 exact; VLM은 텍스트와 ID만 판정",
+        "text_policy": "parser, VLM Reader, VLM Judge 후보와 최종 선택을 모두 보존",
+    }
+    region_count = sum(len(page.get("regions") or []) for page in evidence.get("pages") or [])
+    evidence["summary"] = {
+        "page_count": len(evidence.get("pages") or []),
+        "region_count": region_count,
+        "recovery_region_count": sum(
+            1
+            for page in evidence.get("pages") or []
+            for region in page.get("regions") or []
+            if region.get("origin") == "recovery"
+        ),
+        "unassigned_line_count": sum(
+            len(page.get("unassigned_lines") or []) for page in evidence.get("pages") or []
+        ),
+    }
+    return evidence
+
+
+def _compact_table(table: dict[str, Any] | None) -> dict[str, Any] | None:
+    """심의에 필요한 표 구조와 문구만 남긴다. 좌표·줄 근거는 P1에 있다."""
+    if not table:
+        return None
+    return {
+        "grid": copy.deepcopy(table.get("grid")),
+        "cells": [
+            {
+                "row": cell.get("row"),
+                "col": cell.get("col"),
+                "is_header": bool(cell.get("is_header")),
+                "text": cell.get("text") or "",
+            }
+            for cell in table.get("cells") or []
+        ],
+        "notes": [
+            {"text": note.get("text") or ""}
+            for note in table.get("notes") or []
+            if str(note.get("text") or "").strip()
+        ],
+    }
+
+
+def _review_units(evidence: dict[str, Any], kept_ids: set[str]) -> list[dict[str, Any]]:
+    """상품별 심의 묶음에 템플릿과 실제 Region ID만 싣는다."""
+    templates = evidence.get("product_templates") or {}
+    output = []
+    for unit in evidence.get("review_units") or []:
+        product_id = str(unit.get("product_id") or "")
+        template = templates.get(product_id) or {}
+        region_ids = [
+            str(value) for value in unit.get("region_ids") or []
+            if str(value) in kept_ids
+        ]
+        common_ids = [
+            str(value) for value in unit.get("page_common_region_ids") or []
+            if str(value) in kept_ids
+        ]
+        output.append({
+            "product_id": product_id,
+            "product_name": unit.get("product_name") or template.get("product_name"),
+            "template_id": unit.get("template_id") or template.get("template_id"),
+            "region_ids": region_ids,
+            "page_common_region_ids": common_ids,
+        })
+    return output
+
+
+def _text_source(region: dict[str, Any]) -> str:
+    """정본 텍스트를 OCR/PDF 가 읽었는지 VLM 이 썼는지만 남긴다.
+
+    P3 는 후보 텍스트를 싣지 않으므로, 이 값이 없으면 "이 문장이 광고에 찍힌
+    그대로인지 모델이 고쳐 쓴 것인지"를 P1 을 열어야만 알 수 있다. 근거의 등급이
+    갈리는 값이라 Region 마다 채운다. 어느 후보였는지·일치도·판정 사유 같은
+    세부는 같은 ``region_id`` 로 P1 에서 조회한다.
+    """
+    source = str(region.get("text_source") or "")
+    return "vlm" if source.startswith("vlm") else "ocr"
+
+
+def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
+    """P1을 Region 중심의 간결한 심의 입력으로 투영한다.
+
+    P3는 심의 모델이 읽을 최종 텍스트와 구분값만 담는다. OCR 줄, 후보 텍스트,
+    읽기 순서, 색인, 진단과 좌표 출처는 P1의 같은 ``region_id``로 조회한다.
+    """
+    pages_out = []
+    kept_ids: set[str] = set()
+    for page in evidence.get("pages") or []:
+        regions_out = []
+        for region in page.get("regions") or []:
+            text = str(region.get("text") or "").strip()
+            bbox = copy.deepcopy(region.get("bbox"))
+            if not text and not bbox:
+                continue
+            region_id = str(region["region_id"])
+            expected = rf"p{int(page['page_no'])}_r\d{{3,}}"
+            if re.fullmatch(expected, region_id) is None:
+                raise ValueError(
+                    f"P3 region_id 형식이 잘못되었습니다: {region_id}; expected {expected}"
+                )
+            if region_id in kept_ids:
+                raise ValueError(f"P3 region_id가 중복되었습니다: {region_id}")
+            kept_ids.add(region_id)
+            labels = []
+            for label in region.get("semantic_labels") or []:
+                value = str(label or "").strip()
+                if value and value not in labels:
+                    labels.append(value)
+            item = {
+                "region_id": region_id,
+                "product_id": region.get("product_id"),
+                "bbox": bbox,
+                "selected_text": text,
+                "labels": labels,
+                "kind": "table" if region.get("table") else "text",
+                "needs_review": bool(region.get("needs_review")),
+                "text_source": _text_source(region),
+            }
+            table = _compact_table(region.get("table"))
+            if table:
+                item["table"] = table
+            regions_out.append(item)
+        pages_out.append({
+            "page_no": int(page["page_no"]),
+            # bbox를 화면 좌표로 환산하는 데 필요한 최소 메타데이터다.
+            "canvas": copy.deepcopy(page.get("canvas")),
+            "regions": regions_out,
+        })
+
+    return {
+        "contract": {
+            "version": P3_VERSION,
+            "source_evidence_version": P1_VERSION,
+            "review_unit": "region",
+            "text_policy": "one evidence-verified final text per region; all candidates stay in P1",
+            "region_id_policy": "page-scoped pN_rNNN in final page order",
+            "reference_policy": "P1 and P3 share region_id; review results return region_ids",
+        },
+        "document": {
+            key: copy.deepcopy(evidence.get(key))
+            for key in ("doc_id", "source_file", "file_type", "classification", "template")
+        },
+        "review_units": _review_units(evidence, kept_ids),
+        "pages": pages_out,
+        "review_result_contract": {
+            "required_fields": ["result", "reason", "region_ids"],
+            "result_enum": ["위반", "판정불가", "충족"],
+            "region_ids": "P3 pages[].regions[].region_id에 존재하는 값만 허용",
+        },
+    }
