@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..review.resolution import resolve_template
@@ -43,6 +44,27 @@ def template_labels(catalog: dict[str, Any], template_id: str | None) -> list[st
     return [item["gubun"] for item in template["items"]]
 
 
+def template_label_examples(
+    catalog: dict[str, Any], template_id: str | None, labels: list[str],
+) -> dict[str, list[str]]:
+    """선택된 템플릿에서 라벨별 긍정 예시를 짧게 모은다."""
+    templates = catalog.get("templates") or {}
+    selected = [templates[template_id]] if template_id in templates else templates.values()
+    output = {label: [] for label in labels}
+    for template in selected:
+        for item in template.get("items") or []:
+            label = str(item.get("gubun") or "")
+            if label not in output:
+                continue
+            for entry in item.get("entries") or []:
+                example = " ".join(str(entry.get("example") or "").split())
+                if example and example not in output[label]:
+                    output[label].append(example)
+                if len(output[label]) >= 2:
+                    break
+    return output
+
+
 def _product_meta(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """페이지 소유권 판정이 돌려준 상품 정보를 product_id로 모은다."""
     output: dict[str, dict[str, Any]] = {}
@@ -73,6 +95,54 @@ def _clean(value: Any) -> str | None:
     if not text or text == "판단불가":
         return None
     return text
+
+
+def _normalized_name(value: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).casefold()
+
+
+def _region_text(region: dict[str, Any]) -> str:
+    text = str(region.get("text") or "").strip()
+    if text:
+        return text
+    return "\n".join(
+        str(line.get("text") or "").strip() for line in region.get("lines") or []
+        if str(line.get("text") or "").strip()
+    )
+
+
+def _validate_product_name(
+    product: dict[str, Any], regions: list[dict[str, Any]], shown: str | None,
+) -> tuple[str | None, dict[str, Any]]:
+    """상품명 메타데이터와 실제 상품 Region 텍스트를 상호 검증한다.
+
+    텍스트에서 상품명을 직접 찾은 경우만 `노출`로 교정한다. 찾지 못했다고 바로
+    `미노출`로 바꾸지는 않는다. OCR 누락이나 제목 Region 소유권 오류일 수 있기
+    때문이다.
+    """
+    name = str(product.get("name") or "").strip()
+    normalized = _normalized_name(name)
+    haystack = _normalized_name("\n".join(_region_text(region) for region in regions))
+    matched = len(normalized) >= 4 and normalized in haystack
+    reported = shown
+    effective = "노출" if matched else shown
+    if matched and reported != "노출":
+        status = "corrected_to_shown"
+    elif matched:
+        status = "verified_shown"
+    elif reported == "노출":
+        status = "shown_not_verified_in_product_regions"
+    elif not name:
+        status = "name_missing"
+    else:
+        status = "not_shown_in_product_regions"
+    return effective, {
+        "status": status,
+        "reported": reported,
+        "effective": effective,
+        "product_name": name or None,
+        "matched_in_product_regions": matched,
+    }
 
 
 def _per_product_value(
@@ -127,6 +197,7 @@ def resolve_product_templates(
         product = meta.get(product_id) or {}
         group = group_of.get(product_id) or doc_group
         shown = shown_of.get(product_id) or doc_shown
+        shown, name_consistency = _validate_product_name(product, regions, shown)
         product_doc = {
             "source_file": doc.get("source_file"),
             "product_group": group,
@@ -139,6 +210,7 @@ def resolve_product_templates(
         resolution["labels"] = template_labels(catalog, resolution.get("template_id"))
         resolution["product_group"] = group
         resolution["product_name_shown"] = shown
+        resolution["product_name_consistency"] = name_consistency
         resolution["product_name"] = product.get("name")
         resolution["region_count"] = len(regions)
         output[product_id] = resolution

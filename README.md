@@ -143,7 +143,7 @@ P3의 `pages[].regions[]`가 심의의 기본 근거입니다.
 | `kind` | `text` 또는 `table` |
 | `needs_review` | 파싱 품질상 원문 대조가 필요한지 여부 |
 | `text_source` | 최종 텍스트가 `ocr` 계열인지 `vlm`인지 |
-| `table` | 표인 경우의 행·열·셀·주석 구조 |
+| `table` | 표인 경우의 상태와 크기. 검증 완료 표만 반복 키 없는 `rows` 행렬 포함 |
 
 `needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 표 셀 미배치, 낮은 판독
 확신도 같은 **파싱 품질 신호**입니다. 구체적인 사유는 같은 `region_id`의 P1

@@ -47,6 +47,44 @@ def test_fc87_label_schema_avoids_unsupported_unique_items_constraint():
 
     assert "uniqueItems" not in labels
     assert labels["maxItems"] == 2
+    required = schema["properties"]["region_labels"]["items"]["required"]
+    assert "evidence" in required
+
+
+def test_label_evidence_must_be_an_exact_region_quote():
+    result = semantic.validate_labels(
+        {"analysis": "", "region_labels": [{
+            "region_id": "p1_r001",
+            "labels": ["가입대상", "가입금액"],
+            "evidence": [
+                {"label": "가입대상", "quote": "가입대상 개인"},
+                {"label": "가입금액", "quote": "월 1억원 이상"},
+            ],
+            "confidence": 0.9,
+            "reason": "",
+        }]},
+        ["p1_r001"],
+        ["가입대상", "가입금액"],
+        region_texts={"p1_r001": "가입대상 개인\n가입금액 100만원 이상"},
+    )
+
+    decision = result["region_labels"][0]
+    assert decision["labels"] == ["가입대상"]
+    assert decision["evidence"] == [{"label": "가입대상", "quote": "가입대상 개인"}]
+
+
+def test_contradictory_vlm_reason_cannot_keep_a_label():
+    result = semantic.validate_labels(
+        {"analysis": "", "region_labels": [{
+            "region_id": "p1_r001", "labels": ["유의사항"],
+            "evidence": [{"label": "유의사항", "quote": "가입대상 개인"}],
+            "confidence": 1.0, "reason": "가입조건이나 허용 라벨 없음",
+        }]},
+        ["p1_r001"], ["유의사항"],
+        region_texts={"p1_r001": "가입대상 개인"},
+    )
+
+    assert result["region_labels"][0]["labels"] == []
 
 
 def test_label_pages_attaches_multiple_labels_without_children(monkeypatch):
@@ -76,7 +114,7 @@ def test_p3_keeps_one_region_with_plain_label_list_and_no_indexes():
     p3 = export_v2.build_p3(p1)
 
     output = p3["pages"][0]["regions"][0]
-    assert p3["contract"]["version"] == "nh-ad-region-review-input-v5"
+    assert p3["contract"]["version"] == "nh-ad-region-review-input-v6"
     assert output["region_id"] == "p1_r001"
     assert output["selected_text"] == region["text"]
     assert output["labels"] == ["가입대상", "가입금액"]
@@ -102,6 +140,23 @@ def test_explicit_business_term_alias_adds_the_catalog_label():
     assert semantic.add_explicit_alias_labels(
         "이자지급방식 만기일시지급식", [], ["상품명", "이자지급시기"],
     ) == ["이자지급시기"]
+
+
+def test_explicit_headings_are_labeled_before_vlm_judgment():
+    evidence = semantic.explicit_heading_evidence(
+        "가입대상 개인(적립식)\n가입금액 월 1만원 이상\n최고금리 연 3.45%",
+        ["유의사항", "가입대상", "가입금액", "금리"],
+    )
+
+    assert list(evidence) == ["가입대상", "가입금액", "금리"]
+    assert evidence["금리"] == "최고금리 연 3.45%"
+
+
+def test_terms_mentioned_inside_a_warning_are_not_explicit_headings():
+    assert semantic.explicit_heading_evidence(
+        "정부정책에 따라 대출한도와 대출금리가 변경될 수 있습니다.",
+        ["대출한도", "대출금리", "유의사항"],
+    ) == {}
 
 
 def test_short_product_title_cannot_inherit_page_labels():

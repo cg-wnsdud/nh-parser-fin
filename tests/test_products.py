@@ -112,6 +112,49 @@ def test_products_that_disagree_each_keep_their_own_judgment():
     assert resolved["product_2"]["template_id"] == "대출성상품-상품명 미노출"
 
 
+def test_visible_product_name_corrects_a_false_not_shown_judgment():
+    """실제 통합 예금 샘플처럼 상품명 메타와 미노출 판정이 모순되면 교정한다."""
+    catalog = load_catalog()
+    doc = _doc(
+        [
+            {"product_id": "product_1", "name": "NH고향사랑기부적금",
+             "product_group": "예금성", "product_name_shown": "미노출"},
+            {"product_id": "product_2", "name": "NH고향사랑기부예금",
+             "product_group": "예금성", "product_name_shown": "노출"},
+        ],
+        [
+            {"region_id": "r1", "product_id": "product_1",
+             "lines": [{"text": "NH고향사랑기부적금"}]},
+            {"region_id": "r2", "product_id": "product_1",
+             "lines": [{"text": "가입대상 개인(적립식)\n가입금액 월 1만원 이상"}]},
+            {"region_id": "r3", "product_id": "product_2",
+             "lines": [{"text": "NH고향사랑기부예금"}]},
+        ],
+        source_file="2. 예금성상품(거치식·적립식 통합).pdf",
+        group="예금성", shown="노출",
+    )
+
+    resolved = templates.resolve_product_templates(doc, catalog)
+
+    product = resolved["product_1"]
+    assert product["product_name_shown"] == "노출"
+    assert product["product_name_consistency"]["status"] == "corrected_to_shown"
+    assert product["template_id"] == "예금성상품-적립식"
+
+
+def test_selected_template_examples_are_grouped_by_allowed_label():
+    catalog = load_catalog()
+    labels = ["가입대상", "가입금액", "유의사항"]
+
+    examples = templates.template_label_examples(
+        catalog, "예금성상품-적립식", labels,
+    )
+
+    assert set(examples) == set(labels)
+    assert all(examples[label] for label in labels)
+    assert len(examples["가입대상"]) <= 2
+
+
 def test_unknown_product_can_still_use_the_shared_common_labels():
     """소유권이 unknown으로 흘러도 회사명·심의번호는 라벨을 받을 수 있어야 한다.
 

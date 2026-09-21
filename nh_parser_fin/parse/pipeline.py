@@ -25,12 +25,17 @@ from .ids import normalize_region_ids
 from .quality import flag
 from .recovery import build_recovery_candidates
 from .semantic import (
-    add_explicit_alias_labels,
     analyze_page_context,
     analyze_product_labels,
     constrain_title_labels,
+    explicit_heading_evidence,
 )
-from .templates import PAGE_COMMON, resolve_product_templates, review_units
+from .templates import (
+    PAGE_COMMON,
+    resolve_product_templates,
+    review_units,
+    template_label_examples,
+)
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -342,9 +347,6 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
             continue
         region["kind"] = "table"
         region["table"] = grid
-        region["table_status"] = (
-            "placed" if not grid["unplaced_line_refs"] else "partial"
-        )
         # 원래 줄 이어붙이기는 후보로 남긴다. 모든 줄이 셀/주석에 배치되고 신뢰도가
         # 충분할 때만 격자 표현을 정본으로 쓴다. 불완전 표가 정확한 OCR 줄을 P3에서
         # 가리는 일을 막는다.
@@ -357,10 +359,6 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
             "line_assembled": assembled,
             "table_grid": grid["text_grid"],
         }
-        note_text = "\n".join(
-            str(note.get("text") or "").strip() for note in grid.get("notes") or []
-            if str(note.get("text") or "").strip()
-        )
         slots = max(1, int(grid["grid"]["rows"]) * int(grid["grid"]["cols"]))
         density = len([cell for cell in grid["cells"] if str(cell.get("text") or "").strip()]) / slots
         region["table_cell_density"] = round(density, 4)
@@ -369,13 +367,13 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
             and grid["confidence"] >= 0.7
             and density >= 0.3
         )
+        region["table_status"] = "complete" if complete else "partial"
         if complete:
-            region["text"] = "\n\n".join(
-                value for value in (grid["text_grid"], note_text) if value
-            )
-            region["text_source"] = (
-                "ocr_table_grid_with_notes" if note_text else "ocr_table_grid"
-            )
+            # 셀 배치는 구조 힌트일 뿐 원문을 대체하지 않는다. Markdown 격자를
+            # selected_text로 쓰면 완전/부분 표에 따라 표현이 달라지고, 잘못 배치된
+            # 셀이 검색 텍스트까지 오염시킨다.
+            region["text"] = assembled
+            region["text_source"] = "ocr_table_lines"
         else:
             region["text"] = assembled
             # 표 구조는 P1/P3에 남지만 selected_text는 모든 원문 줄을 보존한다.
@@ -394,6 +392,7 @@ def _label_pages(
     pages: list[dict[str, Any]],
     product_templates: dict[str, dict[str, Any]],
     images: dict[int, Image.Image],
+    catalog: dict[str, Any] | None = None,
 ) -> None:
     """상품별로 나눠 라벨링한다.
 
@@ -429,17 +428,36 @@ def _label_pages(
                 product_name=resolution.get("product_name"),
                 template_id=resolution.get("template_id"),
                 labels=labels,
+                positive_examples=template_label_examples(
+                    catalog or load_catalog(), resolution.get("template_id"), labels,
+                ),
             )
             notes.append(result.get("analysis") or "")
             by_region = {item["region_id"]: item for item in result["region_labels"]}
             for region in regions:
                 decision = by_region[str(region["region_id"])]
-                selected = add_explicit_alias_labels(
-                    region.get("text"), list(decision["labels"]), labels,
-                )
+                heading_evidence = explicit_heading_evidence(region.get("text"), labels)
+                selected = list(heading_evidence)
+                selected += [
+                    label for label in decision["labels"] if label not in selected
+                ]
                 selected = constrain_title_labels(region, selected)
                 region["semantic_labels"] = selected
                 decision["labels"] = list(selected)
+                evidence = [
+                    {"label": label, "quote": quote, "source": "explicit_heading"}
+                    for label, quote in heading_evidence.items() if label in selected
+                ]
+                evidence += [
+                    {**item, "source": "vlm"}
+                    for item in decision.get("evidence") or []
+                    if item.get("label") in selected
+                    and item.get("label") not in {entry["label"] for entry in evidence}
+                ]
+                decision["evidence"] = evidence
+                decision["deterministic_labels"] = [
+                    label for label in heading_evidence if label in selected
+                ]
                 region["label_decision"] = decision
                 # 라벨이 없는 것 자체는 검수 사유가 아니다. 광고 수식어구처럼
                 # 템플릿의 어느 구분값에도 해당하지 않는 문구가 정상적으로 존재한다.
@@ -647,7 +665,7 @@ def run_full_pipeline(
 
         # 3단계 — 상품별 라벨링. 한 Region에 해당하는 구분값을 한 번에 모두
         # 받는다. 줄별 span이나 자식 Region은 만들지 않는다.
-        _label_pages(pages, product_templates, images)
+        _label_pages(pages, product_templates, images, catalog)
         doc["multi_label_regions"] = sum(
             1 for page in pages for region in page.get("regions") or []
             if len(region.get("semantic_labels") or []) > 1

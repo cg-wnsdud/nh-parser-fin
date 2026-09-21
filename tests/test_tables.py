@@ -4,6 +4,7 @@
 """
 from nh_parser_fin.parse import tables
 from nh_parser_fin.parse import pipeline as full_pipeline
+from nh_parser_fin.parse import export as export_v2
 
 
 def _line(ref, x0, y0, x1, y1, text):
@@ -221,6 +222,64 @@ def test_sparse_table_grid_keeps_source_lines_and_flags_review(monkeypatch):
     assert region["text"] == source
     assert region["table_cell_density"] < 0.3
     assert "table_sparse_grid" in region["review_reasons"]
+
+
+def test_p3_compacts_only_verified_tables_to_a_matrix():
+    region = {
+        "region_id": "p1_r001", "product_id": "product_1",
+        "bbox": [10, 10, 400, 100], "text": "구분 금리\n기본 3.0%",
+        "text_source": "ocr_table_lines", "semantic_labels": ["금리"],
+        "needs_review": False, "table_status": "complete",
+        "table": {
+            "grid": {"rows": 2, "cols": 2},
+            "cells": [
+                {"row": 0, "col": 0, "is_header": True, "text": "구분"},
+                {"row": 0, "col": 1, "is_header": True, "text": "금리"},
+                {"row": 1, "col": 0, "is_header": False, "text": "기본"},
+                {"row": 1, "col": 1, "is_header": False, "text": "3.0%"},
+            ],
+            "notes": [], "unplaced_line_refs": [], "confidence": 0.95,
+        },
+    }
+    evidence = export_v2.build_p1({
+        "doc_id": "d", "source_file": "s.pdf", "file_type": "pdf",
+        "classification": {}, "template": {},
+        "pages": [{"page_no": 1, "canvas": [500, 500], "regions": [region]}],
+    })
+
+    output = export_v2.build_p3(evidence)["pages"][0]["regions"][0]
+
+    assert output["table"] == {
+        "status": "complete",
+        "shape": [2, 2],
+        "header_rows": [0],
+        "rows": [["구분", "금리"], ["기본", "3.0%"]],
+    }
+    assert "cells" not in output["table"]
+
+
+def test_p3_does_not_publish_unverified_cell_guesses():
+    region = {
+        "region_id": "p1_r001", "product_id": "product_1",
+        "bbox": [10, 10, 400, 100], "text": "구분\n금리\n3.0%",
+        "text_source": "ocr_table_lines_fallback", "semantic_labels": [],
+        "needs_review": True, "table_status": "partial",
+        "table": {
+            "grid": {"rows": 2, "cols": 2},
+            "cells": [{"row": 0, "col": 0, "is_header": True, "text": "구분"}],
+            "notes": [], "unplaced_line_refs": ["L2"], "confidence": 0.6,
+        },
+    }
+    evidence = export_v2.build_p1({
+        "doc_id": "d", "source_file": "s.pdf", "file_type": "pdf",
+        "classification": {}, "template": {},
+        "pages": [{"page_no": 1, "canvas": [500, 500], "regions": [region]}],
+    })
+
+    output = export_v2.build_p3(evidence)["pages"][0]["regions"][0]
+
+    assert output["selected_text"] == "구분\n금리\n3.0%"
+    assert output["table"] == {"status": "partial", "shape": [2, 2]}
 
 
 def test_build_grid_returns_none_when_the_model_says_not_a_table():

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
@@ -37,7 +38,74 @@ LABEL_CHUNK = 15
 # 템플릿의 정식 구분값과 광고에서 흔히 쓰는 표기 차이. 파일명·Region ID가 아니라
 # 업무 용어를 정규화하므로 새 입력에도 같은 규칙을 적용한다.
 LABEL_ALIASES = {
-    "이자지급시기": ("이자지급방식", "이자지급방법", "이자지급주기"),
+    "가입대상": ("가입대상", "가입자격"),
+    "가입금액": ("가입금액", "납입금액"),
+    "가입기간": ("가입기간", "계약기간"),
+    "금리": ("기본금리", "적용금리", "최고금리", "최저금리"),
+    "우대금리": ("우대금리", "금리우대"),
+    "중도해지이율": ("중도해지이율", "중도해지금리"),
+    "만기후이율": ("만기후이율", "만기후금리"),
+    "이자지급시기": ("이자지급시기", "이자지급방식", "이자지급방법", "이자지급주기"),
+    "이자지급제한": ("이자지급제한",),
+    "예상수취이자": ("예상수취이자", "예상이자"),
+    "대출대상": ("대출대상",),
+    "대출한도": ("대출한도",),
+    "대출기간": ("대출기간",),
+    "대출금리": ("대출금리",),
+    "상환방법": ("상환방법", "상환방식"),
+    "부대비용": ("부대비용",),
+    "채권보전": ("채권보전",),
+    "연회비": ("연회비",),
+    "수수료": ("수수료",),
+}
+
+# 카탈로그의 예시는 실제 문구 형태를 보여 주지만 구분값 자체의 경계를 설명하지는
+# 않는다. 짧은 정의와 대표적인 반례를 함께 줘서, 단어가 언급됐다는 이유만으로
+# `유의사항` 문장을 금리·한도 등으로 오인하지 않게 한다.
+LABEL_DEFINITIONS = {
+    "회사명": "광고의 금융회사·카드사 명칭",
+    "상품명": "광고 대상 금융상품의 고유 명칭",
+    "가입대상": "예금·적금에 가입할 수 있는 고객 조건",
+    "가입금액": "납입 가능 금액·한도·주기",
+    "가입기간": "계약 또는 저축 기간",
+    "금리": "예금·적금의 기본·적용·최고 금리 값",
+    "우대금리": "조건 충족 시 추가되는 우대 금리와 조건",
+    "중도해지이율": "만기 전 해지 시 적용 이율",
+    "만기후이율": "만기 후 찾아가지 않을 때 적용 이율",
+    "이자지급시기": "이자 지급 주기·시점·방식",
+    "이자지급제한": "이자 지급이 제한되는 조건",
+    "예상수취이자": "예시 원금·기간을 전제로 계산한 예상 이자",
+    "예금자보호": "예금보험 보호 여부·한도 안내",
+    "대출대상": "대출 신청 자격·소득·신용 조건",
+    "대출한도": "대출 가능한 최소·최대 금액",
+    "대출기간": "대출 계약·상환 기간",
+    "대출금리": "대출에 적용되는 금리 범위와 산정 기준",
+    "상환방법": "원금과 이자를 갚는 방식",
+    "부대비용": "인지세·중도상환수수료 등 대출 관련 비용",
+    "채권보전": "담보·보증서·신용 등 채권 보전 방식",
+    "연회비": "카드 연간 이용 대가",
+    "수수료": "서비스 이용·발급·거래에 드는 수수료",
+    "심의번호": "준법감시인·협회 광고 심의 식별번호",
+    "유의사항": "위험·제한·불이익·변동 가능성 등의 주의 문구",
+    "상품내용": "상품의 주요 혜택·구조·서비스 설명",
+    "기초지수": "투자상품 수익률 산정의 기준 지수",
+    "이자율범위": "투자상품 등의 이자율 상·하한 범위",
+    "모집기간 이자율": "모집 기간 및 그 기간에 적용되는 이자율",
+    "모집인 유의사항": "모집인 관련 자격·행위·책임 주의 문구",
+    "대출상담사": "대출상담사 이름·등록번호·소속 정보",
+}
+
+LABEL_NEGATIVE_EXAMPLES = {
+    "가입대상": "유의사항에서 '가입대상은 변경될 수 있음'이라고 언급만 한 문장",
+    "가입금액": "손실 가능성을 설명하며 금액이라는 단어만 쓴 문장",
+    "가입기간": "광고 게시기간·이벤트 기간",
+    "금리": "대출금리 또는 금리 변동 가능성만 경고하는 유의사항",
+    "우대금리": "우대금리가 변경될 수 있다는 경고만 있는 문장",
+    "대출대상": "대출자격이 변경될 수 있다는 유의사항",
+    "대출한도": "대출한도가 신용도에 따라 달라질 수 있다는 유의사항",
+    "대출금리": "대출금리가 변경될 수 있다는 유의사항",
+    "상품명": "일반 명사나 다른 상품을 비교 목적으로 언급한 문구",
+    "유의사항": "가입대상·금액·기간·금리 값을 항목별로 제시한 조건표",
 }
 
 
@@ -106,18 +174,61 @@ def _contact_sheet(
     return sheet
 
 
+def explicit_heading_evidence(text: Any, allowed: list[str]) -> dict[str, str]:
+    """줄 시작의 명시적 표제어를 결정론적으로 찾는다.
+
+    문장 중간의 단어 언급은 잡지 않는다. 예를 들어 "대출한도는 달라질 수
+    있습니다" 같은 유의사항을 한도 값으로 오인하지 않기 위해서다.
+    """
+    found: dict[str, str] = {}
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        candidate = re.sub(r"^[※*ㆍ·•\-–—\s]+", "", line).strip()
+        for canonical, aliases in LABEL_ALIASES.items():
+            if canonical not in allowed or canonical in found:
+                continue
+            for alias in sorted(aliases, key=len, reverse=True):
+                match = re.match(
+                    rf"^{re.escape(alias)}(?:\s*[:：]|\s+|$)", candidate,
+                )
+                if match:
+                    found[canonical] = line
+                    break
+    return found
+
+
 def add_explicit_alias_labels(
     text: Any, selected: list[str], allowed: list[str],
 ) -> list[str]:
-    """Region 원문에 명시된 별칭을 정식 구분값으로 보완한다."""
-    compact = "".join(str(text or "").split())
+    """명시적 표제어 라벨을 VLM 결과보다 우선하여 보완한다."""
     output = [label for label in selected if label in allowed]
-    for canonical, aliases in LABEL_ALIASES.items():
-        if canonical not in allowed or canonical in output:
-            continue
-        if any("".join(alias.split()) in compact for alias in aliases):
-            output.append(canonical)
+    headings = explicit_heading_evidence(text, allowed)
+    for label in allowed:
+        if label in headings and label not in output:
+            output.append(label)
     return output
+
+
+def _label_guide_text(
+    labels: list[str], positive_examples: dict[str, list[str]] | None,
+) -> str:
+    examples = positive_examples or {}
+    blocks = []
+    for label in labels:
+        positives = [
+            _short_text(value, 180) for value in examples.get(label, [])
+            if str(value or "").strip()
+        ][:2]
+        positive_text = " / ".join(positives) or "(템플릿 예시 없음)"
+        blocks.append(
+            f"- {label}\n"
+            f"  정의: {LABEL_DEFINITIONS.get(label, f'{label}에 해당하는 실제 값·조건')}\n"
+            f"  긍정 예시: {positive_text}\n"
+            f"  부정 예시: {LABEL_NEGATIVE_EXAMPLES.get(label, '다른 항목에서 단어만 언급한 문장')}"
+        )
+    return "\n".join(blocks)
 
 
 def constrain_title_labels(region: dict[str, Any], labels: list[str]) -> list[str]:
@@ -544,10 +655,28 @@ def _label_schema(region_ids: list[str], labels: list[str]) -> dict[str, Any]:
                             # HTTP 400으로 거부한다. 중복은 validate_labels에서 제거한다.
                             "maxItems": len(labels),
                         },
+                        "evidence": {
+                            "type": "array",
+                            "maxItems": len(labels),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "enum": labels or ["__none__"],
+                                    },
+                                    "quote": {"type": "string"},
+                                },
+                                "required": ["label", "quote"],
+                                "additionalProperties": False,
+                            },
+                        },
                         "confidence": {"type": "number"},
                         "reason": {"type": "string"},
                     },
-                    "required": ["region_id", "labels", "confidence", "reason"],
+                    "required": [
+                        "region_id", "labels", "evidence", "confidence", "reason",
+                    ],
                     "additionalProperties": False,
                 },
             },
@@ -566,6 +695,7 @@ def analyze_product_labels(
     product_name: str | None,
     template_id: str | None,
     labels: list[str],
+    positive_examples: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """한 상품(또는 페이지 공통) 소속 Region에만 그 상품의 구분값을 붙인다."""
     if not regions or not labels:
@@ -579,11 +709,13 @@ def analyze_product_labels(
     merged: list[dict[str, Any]] = []
     analyses: list[str] = []
     calls = 0
+    guide_text = _label_guide_text(labels, positive_examples)
     for start in range(0, len(regions), LABEL_CHUNK):
         chunk = regions[start:start + LABEL_CHUNK]
         region_ids = [str(region["region_id"]) for region in chunk]
         rows = "\n".join(
             f"- {region['region_id']} bbox={region.get('bbox')} "
+            f"explicit_labels={list(explicit_heading_evidence(region.get('text'), labels))} "
             f"text={_short_text(region.get('text'))}"
             for region in chunk
         )
@@ -593,12 +725,19 @@ def analyze_product_labels(
 적용 템플릿: {template_id or '공통(모든 템플릿 교집합)'}
 허용 라벨: {', '.join(labels)}
 
+선택된 템플릿의 라벨 정의와 예시:
+{guide_text}
+
 아래 REGION ID {len(region_ids)}개를 **모두** region_labels 배열에 정확히 한 번씩
 넣고, 각 Region에 실제로 들어 있는 구분값을 **모두** labels 배열에 넣으세요.
 
 - 판정은 반드시 region_labels 배열에 넣으세요. analysis에 문장으로 적으면 무효입니다.
 - analysis에는 전체 요약 한 문장만, 각 reason은 40자 이내로 쓰세요.
 - 허용 라벨 중 맞는 것이 없으면 labels=[]로 두세요. 억지로 고르지 마세요.
+- 각 labels 항목마다 evidence에 label과 해당 Region 원문에서 그대로 복사한 정확한
+  quote를 하나씩 넣으세요. labels=[]이면 evidence=[]입니다.
+- REGION 목록의 explicit_labels는 줄 시작의 명시적 표제어를 결정론적으로 찾은
+  결과입니다. 해당 표제어가 실제 값을 이끄는 한 반드시 유지하세요.
 - 한 Region에 가입대상과 가입금액처럼 서로 다른 구분값이 함께 있으면
   labels=["가입대상", "가입금액"]처럼 모두 반환하세요.
 - 이 목록은 이미 이 상품 소속으로 확정된 영역입니다. 상품 소유권을 다시 판정하지 마세요.
@@ -650,7 +789,15 @@ def analyze_product_labels(
             calls += 1
         analyses.append(str(result.get("analysis") or ""))
         merged.extend(
-            validate_labels(result, region_ids, labels)["region_labels"]
+            validate_labels(
+                result,
+                region_ids,
+                labels,
+                region_texts={
+                    str(region["region_id"]): str(region.get("text") or "")
+                    for region in chunk
+                },
+            )["region_labels"]
         )
     return {
         "analysis": "\n".join(value for value in analyses if value),
@@ -661,28 +808,60 @@ def analyze_product_labels(
 
 def validate_labels(
     result: dict[str, Any], region_ids: list[str], labels: list[str],
+    *, region_texts: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """허용 라벨 밖의 값은 버리고 누락 Region은 검수 대상으로 채운다."""
+    """허용 라벨과 원문 근거를 검증하고 누락 Region을 검수 대상으로 채운다."""
     allowed = set(labels)
+    known_ids = set(region_ids)
     output: dict[str, dict[str, Any]] = {}
     for item in result.get("region_labels") or []:
         region_id = str(item.get("region_id") or "")
-        if region_id not in set(region_ids) or region_id in output:
+        if region_id not in known_ids or region_id in output:
             continue
         selected = []
         for label in item.get("labels") or []:
             if label in allowed and label not in selected:
                 selected.append(label)
+        valid_evidence = []
+        source = " ".join(str((region_texts or {}).get(region_id) or "").split())
+        for evidence in item.get("evidence") or []:
+            label = str(evidence.get("label") or "")
+            quote = str(evidence.get("quote") or "").strip()
+            normalized_quote = " ".join(quote.split())
+            if (
+                label in selected
+                and label not in {entry["label"] for entry in valid_evidence}
+                and quote
+                and (region_texts is None or normalized_quote in source)
+            ):
+                valid_evidence.append({"label": label, "quote": quote})
+
+        reason = str(item.get("reason") or "")
+        contradiction = bool(selected) and any(
+            phrase in reason.replace(" ", "")
+            for phrase in ("허용라벨없음", "해당없음", "근거없음")
+        )
+        if contradiction:
+            selected = []
+            valid_evidence = []
+            reason = f"모순 응답 제거: {reason}"
+        elif region_texts is not None:
+            supported = {entry["label"] for entry in valid_evidence}
+            selected = [label for label in selected if label in supported]
         output[region_id] = {
             "region_id": region_id,
             "labels": selected,
+            "evidence": [
+                entry for entry in valid_evidence if entry["label"] in selected
+            ],
             "confidence": float(item.get("confidence") or 0.0),
-            "reason": str(item.get("reason") or ""),
+            "reason": reason,
         }
     for region_id in region_ids:
         output.setdefault(region_id, {
             "region_id": region_id,
             "labels": [],
+            "evidence": [],
             "confidence": 0.0,
             "reason": "VLM 응답에서 누락되어 검수 필요",
         })
