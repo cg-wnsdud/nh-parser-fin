@@ -114,7 +114,7 @@ def test_p3_keeps_one_region_with_plain_label_list_and_no_indexes():
     p3 = export_v2.build_p3(p1)
 
     output = p3["pages"][0]["regions"][0]
-    assert p3["contract"]["version"] == "nh-ad-region-review-input-v6"
+    assert p3["contract"]["version"] == "nh-ad-region-review-input-v7"
     assert output["region_id"] == "p1_r001"
     assert output["selected_text"] == region["text"]
     assert output["labels"] == ["가입대상", "가입금액"]

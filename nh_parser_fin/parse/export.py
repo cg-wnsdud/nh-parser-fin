@@ -7,7 +7,7 @@ from typing import Any
 
 
 P1_VERSION = "nh-ad-parse-evidence-v3"
-P3_VERSION = "nh-ad-region-review-input-v6"
+P3_VERSION = "nh-ad-region-review-input-v7"
 
 
 def build_p1(document: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +176,7 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             "source_evidence_version": P1_VERSION,
             "review_unit": "region",
             "text_policy": "one evidence-verified final text per region; all candidates stay in P1",
+            "text_source_values": ["hwp", "digital", "ocr", "vlm"],
             "region_id_policy": "page-scoped pN_rNNN in final page order",
             "reference_policy": "P1 and P3 share region_id; review results return region_ids",
         },

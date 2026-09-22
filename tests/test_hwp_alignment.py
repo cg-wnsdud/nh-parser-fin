@@ -1,5 +1,6 @@
 from nh_parser_fin.parse.hwp_alignment import align_hwp_structure
 from nh_parser_fin.parse import reading
+from nh_parser_fin.parse.export import build_p1, build_p3
 
 
 def test_hwp_paragraph_validates_pdf_region_without_changing_bbox():
@@ -180,3 +181,13 @@ def test_one_row_table_uses_hwp_cell_order_when_pdf_order_is_reversed():
     assert stats["tables_attached"] == 1
     assert region["text"] == "만기일시상환방식\n대출 원금은 만기에 상환"
     assert region["table"]["grid"] == {"rows": 1, "cols": 2}
+
+    region.update({"product_id": "product_1", "semantic_labels": ["상환방법"]})
+    p3 = build_p3(build_p1({
+        "doc_id": "d", "source_file": "d.hwp", "file_type": "hwp",
+        "classification": {}, "template": {},
+        "pages": [{"page_no": 1, "canvas": [500, 500], "regions": [region]}],
+    }))
+    output = p3["pages"][0]["regions"][0]
+    assert output["text_source"] == "hwp"
+    assert p3["contract"]["text_source_values"] == ["hwp", "digital", "ocr", "vlm"]
