@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
+import tempfile
 
 from PIL import Image
 
@@ -35,6 +37,8 @@ class LabPage:
     page_no: int
     image: Image.Image
     origin: dict = field(default_factory=dict)
+    digital_lines: list[dict] = field(default_factory=list)
+    hwp_structure: dict | None = None
 
     @property
     def aspect(self) -> float:
@@ -128,41 +132,98 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
 
 
 def _hwp_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
-    """HWP 는 캔버스가 없다. 내장 이미지 자산 하나를 한 페이지로 본다."""
-    from .assets import decode_asset_image, is_decorative, iter_assets
+    """HWP의 실제 페이지를 로컬 PDF로 렌더하고 구조 텍스트를 함께 싣는다.
+
+    내장 이미지를 가상 페이지로 만들던 예전 경로는 사용자 화면의 페이지/bbox와 맞지
+    않았다. 이제 원본 HWP 이름은 유지한 채 한컴 PDF의 페이지 캔버스를 사용한다.
+    """
+    import pypdfium2 as pdfium
+
+    from .canvas import native_image_dpi, render_pdf_page
+    from .hwp_render import render_hwp_to_pdf
+    from .hwp_structure import parse_hwp_structure, repartition_by_rendered_text
+    from .triage import extract_digital_lines, triage_page
 
     try:
-        from document_processor import DocIR
-    except Exception as exc:  # 사내 파서가 없는 환경
-        raise SystemExit(f"HWP 를 읽으려면 사내 파서(document_processor)가 필요합니다: {exc}")
+        structure = parse_hwp_structure(path)
+    except Exception as exc:
+        raise SystemExit(f"{path.name}: HWP 구조 파싱 실패: {exc}") from exc
 
-    docir = DocIR.from_file(str(path))
-    pages: list[LabPage] = []
-    skipped = 0
-    for name, asset in iter_assets(docir):
-        image = decode_asset_image(asset)
-        if image is None or is_decorative(*image.size):
-            skipped += 1
-            continue
-        original_size = list(image.size)
-        sent, scale = (image, 1.0) if sizing == "asis" else _shrink(image, max_side)
-        pages.append(LabPage(
-            doc_id=path.stem,
-            source_file=path.name,
-            page_no=len(pages) + 1,
-            image=sent,
-            origin={
-                "kind": "hwp",
-                "asset": str(name),
-                "original_px": original_size,
-                "sent_px": list(sent.size),
-                "scale": round(scale, 4),
-                "decorative_skipped": skipped,
-            },
-        ))
-    if not pages:
-        raise SystemExit(f"{path.name}: OCR 에 보낼 내장 이미지가 없습니다 (장식 {skipped}개 제외)")
-    return pages
+    persistent = os.environ.get("HWP_RENDER_DIR", "").strip()
+    temp = None
+    if persistent:
+        render_dir = Path(persistent)
+        render_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        temp = tempfile.TemporaryDirectory(prefix="nh-hwp-pdf-")
+        render_dir = Path(temp.name)
+    pdf_path = render_dir / f"{path.stem}.pdf"
+    try:
+        render_info = render_hwp_to_pdf(path, pdf_path)
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        pages: list[LabPage] = []
+        try:
+            for index, pdf_page in enumerate(pdf):
+                page_no = index + 1
+                width_pt, height_pt = pdf_page.get_size()
+                verdict = triage_page(pdf_page)
+                native = native_image_dpi(pdf_page)
+                dpi_asis = ASIS_PDF_DPI
+                if verdict.verdict in ("scan_like", "hybrid") and native:
+                    dpi_asis = native
+                dpi = dpi_asis
+                if sizing == "maxside":
+                    fit = max_side / (max(width_pt, height_pt) / 72.0)
+                    dpi = max(1, min(dpi_asis, fit))
+                dpi_used = int(round(dpi))
+                canvas = render_pdf_page(pdf_page, page_no, dpi=dpi_used)
+                px_per_pt = dpi_used / 72.0
+                digital = []
+                if verdict.verdict in ("structured", "hybrid"):
+                    digital = [
+                        line.model_dump(mode="json")
+                        for line in extract_digital_lines(pdf_page, px_per_pt)
+                    ]
+                pages.append(LabPage(
+                    doc_id=path.stem,
+                    source_file=path.name,
+                    page_no=page_no,
+                    image=canvas.image,
+                    digital_lines=digital,
+                    hwp_structure=None,
+                    origin={
+                        "kind": "hwp",
+                        "render": render_info,
+                        "rendered_pdf": str(pdf_path) if persistent else None,
+                        "page_pt": [round(width_pt, 1), round(height_pt, 1)],
+                        "page_mm": [round(width_pt / 72 * 25.4), round(height_pt / 72 * 25.4)],
+                        "triage": verdict.verdict,
+                        "triage_detail": verdict.as_dict(),
+                        "native_image_dpi": native,
+                        "dpi_asis": round(dpi_asis, 1),
+                        "dpi_used": dpi_used,
+                        "sent_px": list(canvas.image.size),
+                        "structure_parser": structure["parser"],
+                        "structure_parser_version": structure["parser_version"],
+                        "structure_page_count": structure["page_count"],
+                    },
+                ))
+        finally:
+            pdf.close()
+        rendered_texts = [
+            "\n".join(str(line.get("text") or "") for line in page.digital_lines)
+            for page in pages
+        ]
+        assigned_structure = repartition_by_rendered_text(structure, rendered_texts)
+        for page, page_structure in zip(pages, assigned_structure, strict=True):
+            page.hwp_structure = page_structure
+        if len(pages) != int(structure["page_count"]):
+            for page in pages:
+                page.origin["structure_page_count_mismatch"] = True
+        return pages
+    finally:
+        if temp is not None:
+            temp.cleanup()
 
 
 def load_pages(path: Path, *, sizing: str = "asis", max_side: int = 2500) -> list[LabPage]:

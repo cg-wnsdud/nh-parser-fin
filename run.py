@@ -61,8 +61,10 @@ def _profile(args: argparse.Namespace) -> Profile:
     )
 
 
-def _digital_lines(pdf, page_no: int, origin: dict) -> list[dict]:
+def _digital_lines(pdf, page_no: int, origin: dict, supplied: list[dict] | None = None) -> list[dict]:
     """선택 가능한 PDF 텍스트를 같은 페이지 픽셀 좌표로 읽는다."""
+    if supplied is not None:
+        return list(supplied)
     if pdf is None or origin.get("triage") not in ("structured", "hybrid"):
         return []
     from nh_parser_fin.ingest.triage import extract_digital_lines
@@ -128,7 +130,10 @@ def main() -> None:
             else:
                 merged_det = merged_parsing = merged_lines = 0
 
-            digital = _digital_lines(pdf, page.page_no, page.origin)
+            digital = _digital_lines(
+                pdf, page.page_no, page.origin,
+                page.digital_lines if source.suffix.lower() in (".hwp", ".hwpx") else None,
+            )
             # 조각 오프셋까지 적용된 **페이지 좌표** 박스를 남긴다. `replay.py` 가
             # PaddleX 재호출 없이 조립 로직만 다시 돌릴 때 쓰는 입력이다.
             _write_json(out / "boxes" / f"{key}.json", {
@@ -165,6 +170,8 @@ def main() -> None:
                 },
                 "raw_observations": {"layout_det_res": det, "parsing_res_list": parsing},
             })
+            if page.hwp_structure is not None:
+                evidence["hwp_structure"] = page.hwp_structure
             _write_json(out / "pages" / f"{key}.json", evidence)
 
             media_name = f"parser_v2_{args.run_name}__{key}.png"
