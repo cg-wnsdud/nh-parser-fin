@@ -19,6 +19,7 @@ OCR/PDF 원문과 Reader 결과는 P1 후보에 그대로 남겨 되짚을 수 �
 from __future__ import annotations
 
 import os
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -93,6 +94,12 @@ def scope_from_env() -> str:
 
 def _normalized(value: Any) -> str:
     return "".join(str(value or "").split())
+
+
+def _semantic_alnum(value: Any) -> str:
+    """PUA/기호/공백을 빼고 실제 문자와 숫자만 비교한다."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return "".join(char for char in normalized if char.isalnum()).casefold()
 
 
 def agreement(left: str, right: str) -> float:
@@ -305,6 +312,23 @@ def apply_reading(
             structure_validation.get("status") == "agrees"
             or structure_corroboration.get("status") == "agrees"
         ):
+            # 체크박스 같은 HWP 글리프는 PDF와 구조 파서가 서로 다른 PUA 문자로
+            # 내보내기도 한다. 구조와 VLM의 한글·영숫자 내용이 완전히 같을 때만
+            # VLM이 본 표준 Unicode 기호를 채택한다.
+            if (
+                any(unicodedata.category(char) == "Co" for char in ocr_text)
+                and not any(
+                    unicodedata.category(char) == "Co" for char in final_text
+                )
+                and _semantic_alnum(final_text)
+                == _semantic_alnum(
+                    (region.get("text_candidates") or {}).get("hwp_structure")
+                )
+            ):
+                region["text"] = final_text
+                region["text_source"] = "vlm_structure_verified"
+                region["reading_status"] = "vlm_glyph_verified_by_hwp_structure"
+                return "parser_verified"
             region["reading_status"] = "parser_verified_by_hwp_structure"
             return "parser_verified"
         flag(region, "digital_text_vlm_disagreement")

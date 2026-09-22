@@ -94,6 +94,25 @@ def test_hwp_corroboration_prevents_a_vlm_typo_review():
     assert region.get("needs_review") is not True
 
 
+def test_hwp_structure_allows_vlm_to_replace_only_private_use_glyphs():
+    region = {
+        "bbox": [0, 0, 100, 30],
+        "text": "\uf000지수연동예금(E LD) 안내",
+        "text_source": "digital_ocr_lines",
+        "text_candidates": {"hwp_structure": "\uf3da 지수연동예금(ELD) 안내"},
+        "hwp_structure_validation": {"status": "agrees"},
+    }
+
+    status = reading.apply_reading(
+        region, {"text": "☐ 지수연동예금(ELD) 안내", "confidence": 1.0},
+    )
+
+    assert status == "parser_verified"
+    assert region["text"] == "☐ 지수연동예금(ELD) 안내"
+    assert region["text_source"] == "vlm_structure_verified"
+    assert region.get("needs_review") is not True
+
+
 def test_judge_can_correct_non_digital_ocr_text():
     region = {"bbox": [0, 0, 10, 10], "text": "기본금리 연 2.2S%",
               "text_source": "paddlex_block_content",
