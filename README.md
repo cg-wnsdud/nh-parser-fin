@@ -1,10 +1,10 @@
 # nh-parser-fin
 
 농협 금융 광고물(PDF·PNG/JPG·HWP/HWPX)을 읽어 **심의 단계가 사용할 영역 단위 JSON**으로
-바꾸는 독립 파싱 저장소입니다. 다른 프로젝트의 Python 코드를 import하지 않으며, 필요한
-입력 처리·PaddleX 호출·후처리·VLM 판독·P1/P3 변환 로직을 이 저장소 안에 포함합니다.
+바꾸는 파싱 저장소입니다.
+필요한 입력 처리·PaddleX 호출·후처리·VLM 판독·P1/P3 변환 로직을 이 저장소 안에 포함합니다.
 
-## 결과를 먼저 이해하기
+## 결과물 설명
 
 파이프라인은 문서마다 두 결과를 만듭니다.
 
@@ -28,8 +28,40 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
 }
 ```
 
-표 영역은 같은 객체에 `table.grid`, `table.cells`, `table.notes`가 추가됩니다. 심의 결과는
-`region_ids`를 돌려주면 화면에서 P3의 `bbox`를 사용해 해당 위치를 표시할 수 있습니다.
+표는 `kind: "table"`로 구분합니다. P1에는 셀 좌표와 근거(`table.grid`, `table.cells`,
+`table.notes`)를 보관합니다. P3와 리포트에는 검증을 통과한 표만 `shape`, `header_rows`,
+`rows` 행렬로 표시합니다. 셀 배치가 불완전한 표는 `status: "partial"`과 크기만 전달하며,
+화면에서는 빈 격자 대신 경고와 `selected_text` 원문을 보여 줍니다. 심의 결과가 `region_ids`를
+돌려주면 화면에서 P3의 `bbox`를 사용해 해당 위치를 표시할 수 있습니다.
+
+예를 들어 2행 2열 금리 표는 P3에서 다음처럼 나옵니다. 리포트는 `header_rows`의 0번 행을
+헤더로 그려 `구분 | 금리` / `기본 | 3.0%` 격자로 보여 줍니다.
+
+```json
+{
+  "region_id": "p1_r020",
+  "bbox": [243, 518, 1570, 708],
+  "selected_text": "구분\n금리\n기본\n3.0%",
+  "kind": "table",
+  "table": {
+    "status": "complete",
+    "shape": [2, 2],
+    "header_rows": [0],
+    "rows": [["구분", "금리"], ["기본", "3.0%"]]
+  }
+}
+```
+
+| 구분 | 금리 |
+|---|---|
+| 기본 | 3.0% |
+
+반대로 셀을 모두 검증하지 못했으면 P3에는 아래처럼 행렬을 넣지 않습니다. 리포트도 표 대신
+`표 구조 미검증 (partial, 2×2)` 안내와 `selected_text`를 표시합니다.
+
+```json
+"table": {"status": "partial", "shape": [2, 2]}
+```
 
 ## 전체 처리 흐름
 
@@ -50,9 +82,8 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
 P1 근거 데이터 + P3 심의 입력
 ```
 
-영역을 구분값마다 다시 자르지 않습니다. 한 영역에 `가입대상`과 `가입금액`이 함께 있으면
-그 영역을 유지하고 `labels`에 두 값을 붙입니다. 좌표는 PaddleX 레이아웃 또는 OCR/PDF
-텍스트 줄에서만 만들며 VLM이 좌표를 새로 생성하지 않습니다.
+한 영역에 `가입대상`과 `가입금액`이 함께 있으면 그 영역을 유지하고 `labels`에 두 값을 붙입니다.
+좌표는 PaddleX 레이아웃 또는 OCR/PDF 텍스트 줄에서만 만들며 VLM이 좌표를 새로 생성하지 않습니다.
 
 세부 단계와 VLM 호출 위치는 [docs/PIPELINE.md](docs/PIPELINE.md)를 참고하세요.
 
@@ -61,7 +92,7 @@ P1 근거 데이터 + P3 심의 입력
 이 저장소가 모델을 직접 띄우지는 않습니다. 아래 두 HTTP 서비스가 필요합니다.
 
 1. **PaddleX PP-StructureV3**: spark-1118의 PaddleX 3.6.1 / PaddleOCR 3.6.0
-2. **Gemma VLM**: fc87의 OpenAI 호환 `chat/completions` 엔드포인트
+2. **Gemma VLM**: fc87(saprk-1118 으로 이전 예정)의 OpenAI 호환 `chat/completions` 엔드포인트
 
 ```bash
 cp .env.example .env
