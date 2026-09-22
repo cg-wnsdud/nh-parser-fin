@@ -159,6 +159,15 @@ def test_terms_mentioned_inside_a_warning_are_not_explicit_headings():
     ) == {}
 
 
+def test_deposit_protection_and_notice_headings_are_deterministic():
+    evidence = semantic.explicit_heading_evidence(
+        "▶ 유의사항\n※ 예금자보호법에 따라 원금과 이자를 보호합니다.",
+        ["유의사항", "예금자보호"],
+    )
+
+    assert list(evidence) == ["유의사항", "예금자보호"]
+
+
 def test_short_product_title_cannot_inherit_page_labels():
     region = {
         "text": "NH올원e통장",

@@ -48,6 +48,8 @@ LABEL_ALIASES = {
     "이자지급시기": ("이자지급시기", "이자지급방식", "이자지급방법", "이자지급주기"),
     "이자지급제한": ("이자지급제한",),
     "예상수취이자": ("예상수취이자", "예상이자"),
+    "예금자보호": ("예금자보호법", "예금자보호", "예금보호"),
+    "유의사항": ("유의사항",),
     "대출대상": ("대출대상",),
     "대출한도": ("대출한도",),
     "대출기간": ("대출기간",),
@@ -185,11 +187,16 @@ def explicit_heading_evidence(text: Any, allowed: list[str]) -> dict[str, str]:
         line = raw_line.strip()
         if not line:
             continue
-        candidate = re.sub(r"^[※*ㆍ·•\-–—\s]+", "", line).strip()
+        candidate = re.sub(r"^[※*ㆍ·•▶▷▪■□◾§\-–—\s]+", "", line).strip()
         for canonical, aliases in LABEL_ALIASES.items():
             if canonical not in allowed or canonical in found:
                 continue
             for alias in sorted(aliases, key=len, reverse=True):
+                if canonical == "예금자보호" and re.match(
+                    rf"^{re.escape(alias)}(?:에\s*따라|\s*[:：]|\s+|$)", candidate,
+                ):
+                    found[canonical] = line
+                    break
                 match = re.match(
                     rf"^{re.escape(alias)}(?:\s*[:：]|\s+|$)", candidate,
                 )

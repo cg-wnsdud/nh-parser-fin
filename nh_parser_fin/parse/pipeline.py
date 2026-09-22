@@ -21,6 +21,7 @@ from ..vlm import client as vlm_client
 from . import reading
 from . import tables
 from .export import build_p1, build_p3
+from .hwp_alignment import align_hwp_structure
 from .ids import normalize_region_ids
 from .quality import flag
 from .recovery import build_recovery_candidates
@@ -366,6 +367,9 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
             not grid["unplaced_line_refs"]
             and grid["confidence"] >= 0.7
             and density >= 0.3
+            and len(grid.get("notes") or []) <= len([
+                cell for cell in grid["cells"] if str(cell.get("text") or "").strip()
+            ])
         )
         region["table_status"] = "complete" if complete else "partial"
         if complete:
@@ -384,6 +388,10 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
                 flag(region, "table_low_confidence")
             if density < 0.3:
                 flag(region, "table_sparse_grid")
+            if len(grid.get("notes") or []) > len([
+                cell for cell in grid["cells"] if str(cell.get("text") or "").strip()
+            ]):
+                flag(region, "table_structure_incomplete")
         placed += 1
     page["table_count"] = placed
 
@@ -652,6 +660,7 @@ def run_full_pipeline(
             # 표 구조는 라벨링보다 먼저 복원한다. 라벨러가 셀 낱개가 아니라
             # 표 하나를 보게 해야 구분값을 한 번만 붙인다.
             _place_tables(page, images[int(page["page_no"])])
+            align_hwp_structure(page)
             # 영역 판독도 라벨링 앞이다. 깨진 텍스트로 라벨을 정하면 엉뚱한
             # 구분값이 붙는다 — `2. 대출성상품` p1_r025 는 `)` 한 글자로
             # `상품명` 라벨을 받았다.

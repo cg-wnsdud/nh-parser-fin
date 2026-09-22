@@ -111,7 +111,13 @@ def _text_source(region: dict[str, Any]) -> str:
     세부는 같은 ``region_id`` 로 P1 에서 조회한다.
     """
     source = str(region.get("text_source") or "")
-    return "vlm" if source.startswith("vlm") else "ocr"
+    if source.startswith("vlm"):
+        return "vlm"
+    if source.startswith("digital"):
+        return "digital"
+    if source.startswith("hwp_structure"):
+        return "hwp"
+    return "ocr"
 
 
 def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:

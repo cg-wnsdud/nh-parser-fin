@@ -224,6 +224,28 @@ def test_sparse_table_grid_keeps_source_lines_and_flags_review(monkeypatch):
     assert "table_sparse_grid" in region["review_reasons"]
 
 
+def test_many_notes_make_a_table_partial_even_when_no_lines_are_unplaced(monkeypatch):
+    lines = _benefit_table()[:6]
+    region = {
+        "region_id": "p1_r001", "bbox": [560, 1842, 1369, 1892],
+        "kind": "table", "text": "\n".join(line["text"] for line in lines),
+        "text_source": "digital_ocr_lines", "lines": lines,
+    }
+    page = {"page_no": 1, "regions": [region], "table_areas": []}
+    monkeypatch.setattr(full_pipeline.tables, "place_cells", lambda image, item: {
+        "grid": {"rows": 2, "cols": 2},
+        "cells": [{"row": 0, "col": 0, "text": "구분"}],
+        "notes": [{"text": f"주석 {index}"} for index in range(5)],
+        "unplaced_line_refs": [], "confidence": 1.0,
+        "analysis": "본문을 주석으로 잘못 보냄", "text_grid": "| 구분 |",
+    })
+
+    full_pipeline._place_tables(page, image=None)
+
+    assert region["table_status"] == "partial"
+    assert "table_structure_incomplete" in region["review_reasons"]
+
+
 def test_p3_compacts_only_verified_tables_to_a_matrix():
     region = {
         "region_id": "p1_r001", "product_id": "product_1",

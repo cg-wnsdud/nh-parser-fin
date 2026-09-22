@@ -299,6 +299,14 @@ def apply_reading(
         if _normalized(ocr_text) == _normalized(final_text):
             region["reading_status"] = "parser_verified"
             return "parser_verified"
+        structure_validation = region.get("hwp_structure_validation") or {}
+        structure_corroboration = region.get("hwp_structure_corroboration") or {}
+        if (
+            structure_validation.get("status") == "agrees"
+            or structure_corroboration.get("status") == "agrees"
+        ):
+            region["reading_status"] = "parser_verified_by_hwp_structure"
+            return "parser_verified"
         flag(region, "digital_text_vlm_disagreement")
         region["reading_status"] = "parser_preserved"
         return "parser_preserved"
