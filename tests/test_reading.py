@@ -137,6 +137,24 @@ def test_table_regions_are_never_re_read():
     assert reading.should_read(table, "targeted") is False
 
 
+def test_document_structure_text_is_never_re_read_or_replaced():
+    region = {
+        "bbox": [0, 0, 100, 30],
+        "text": "준비서류\n실명확인증표\n재직확인서류",
+        "text_source": "document_processor_html",
+        "bbox_quality": "display_exact",
+    }
+
+    assert reading.should_read(region, "all") is False
+    status = reading.apply_reading(
+        region,
+        {"text": "준비서류", "confidence": 0.99},
+    )
+    assert status == "parser_preserved"
+    assert region["text"] == "준비서류\n실명확인증표\n재직확인서류"
+    assert region["text_source"] == "document_processor_html"
+
+
 def test_targeted_scope_picks_only_suspicious_regions():
     broken = {"bbox": [0, 0, 10, 10], "text": ")", "lines": [{"text": ")"}]}
     conflict = {"bbox": [0, 0, 10, 10], "text": "긴 본문입니다 " * 3,

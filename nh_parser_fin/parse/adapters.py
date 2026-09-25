@@ -212,6 +212,9 @@ def build_page_evidence(
         if block_text and line_text:
             agreement = SequenceMatcher(None, _normalized(block_text), _normalized(line_text)).ratio()
             region["text_agreement"] = round(agreement, 4)
+            structured_primary = str(region.get("block_text_source") or "").startswith(
+                "document_processor"
+            )
             # 디지털 텍스트는 OCR보다 문자 정확도가 높아 기존 파이프라인도 정본으로 썼다.
             #
             # 디지털 줄이 없을 때 무조건 `block_content` 를 쓰면 안 된다. PNG 입력은
@@ -226,7 +229,14 @@ def build_page_evidence(
                 if len(_normalized(line.get("text"))) >= 2
                 and _normalized(line.get("text")) not in _normalized(block_text)
             ]
-            if any(line.get("source") == "digital" for line in owned_lines):
+            # HWP/PDF 구조 파서가 문단·표 행 단위로 준 텍스트는 전량 원문 정본이다.
+            # 렌더링 PDF의 디지털 줄은 bbox를 교차 검증하는 보조 증거일 뿐이다. 줄의
+            # 읽기 순서가 깨지거나 일부만 영역 안에 들어왔다는 이유로 구조 텍스트를
+            # 덮으면 HWP 표의 항목 목록이 유실된다.
+            if structured_primary:
+                region["text"] = block_text
+                region["text_source"] = region.get("block_text_source")
+            elif any(line.get("source") == "digital" for line in owned_lines):
                 region["text"] = line_text
                 region["text_source"] = "digital_ocr_lines"
             elif missing:
@@ -235,7 +245,11 @@ def build_page_evidence(
             else:
                 region["text"] = block_text
                 region["text_source"] = "paddlex_block_content"
-            if agreement >= STRONG_AGREEMENT:
+            if structured_primary:
+                region["text_selection_status"] = (
+                    "sources_agree" if agreement >= STRONG_AGREEMENT else "structured_primary"
+                )
+            elif agreement >= STRONG_AGREEMENT:
                 region["text_selection_status"] = "sources_agree"
             elif agreement >= VLM_CONFLICT:
                 # 어순·공백·줄 합치기 차이가 대부분이다. 기록은 하되 별도 VLM 호출은 하지 않는다.

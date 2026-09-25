@@ -121,6 +121,14 @@ def should_read(region: dict[str, Any], scope: str) -> bool:
         return False
     if region.get("kind") == "table" or region.get("table"):
         return False
+    # document-processor가 HWP/PDF 내부 구조에서 직접 읽은 텍스트는 이미지 전사가
+    # 보완할 대상이 아니다. VLM Reader가 행 일부만 읽어 정본을 줄이는 일을 막고,
+    # 이미지 전용 신규 블록은 기존대로 Reader를 거친다.
+    if (
+        str(region.get("text_source") or "").startswith("document_processor")
+        and _normalized(region.get("text"))
+    ):
+        return False
     if scope == "all":
         return True
     # targeted — 의심스러운 곳만.
@@ -250,7 +258,7 @@ def clean_text(value: Any) -> str:
 
 def _has_digital_evidence(region: dict[str, Any]) -> bool:
     """PDF 내장 텍스트처럼 글자와 좌표를 직접 얻은 Region인지 확인한다."""
-    if str(region.get("text_source") or "").startswith("digital_"):
+    if str(region.get("text_source") or "").startswith(("digital_", "document_processor")):
         return True
     return any(
         str(line.get("source") or "").casefold() == "digital"
