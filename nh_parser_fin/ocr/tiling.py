@@ -156,6 +156,14 @@ def _overlap_share(a0: int, a1: int, b0: int, b1: int) -> float:
     return max(0, min(a1, b1) - max(a0, b0)) / max(1, min(a1 - a0, b1 - b0))
 
 
+def _same_content(left: dict, right: dict) -> bool:
+    """타일 위치 때문에 라벨만 달라진 동일 블록인지 확인한다."""
+    normalize = lambda value: "".join(str(value or "").split()).casefold()
+    a = normalize(left.get("content"))
+    b = normalize(right.get("content"))
+    return bool(a) and a == b
+
+
 def dedupe(boxes: list[dict], *, x_share: float = 0.90, y_share: float = 0.50) -> tuple[list[dict], int]:
     """조각 경계에서 같은 요소가 두 번 온 것만 좁게 합친다 (기존 파이프라인과 같은 기준).
 
@@ -168,19 +176,37 @@ def dedupe(boxes: list[dict], *, x_share: float = 0.90, y_share: float = 0.50) -
         for index, other in enumerate(kept):
             if other.get("piece") == box.get("piece"):
                 continue
-            if other["label"].casefold() != box["label"].casefold():
-                continue
             ax0, ay0, ax1, ay1 = other["bbox"]
             bx0, by0, bx1, by1 = box["bbox"]
-            if _overlap_share(ax0, ax1, bx0, bx1) < x_share:
+            x_overlap = _overlap_share(ax0, ax1, bx0, bx1)
+            y_overlap = _overlap_share(ay0, ay1, by0, by1)
+            same_label = other["label"].casefold() == box["label"].casefold()
+            # 같은 요소가 타일 0의 하단에서는 text, 타일 1의 상단에서는 doc_title로
+            # 분류되는 실측 사례가 있다. 라벨이 다를 때는 일반 중복 기준을 완화하지
+            # 않고, 양축 95% 이상 + 정규화 원문 완전 일치일 때만 동일 요소로 본다.
+            label_conflict_duplicate = (
+                not same_label
+                and x_overlap >= 0.95
+                and y_overlap >= 0.95
+                and _same_content(other, box)
+            )
+            if not same_label and not label_conflict_duplicate:
                 continue
-            if _overlap_share(ay0, ay1, by0, by1) < y_share:
+            if x_overlap < x_share:
+                continue
+            if y_overlap < y_share:
                 continue
             union = dict(other)
             union["bbox"] = [min(ax0, bx0), min(ay0, by0), max(ax1, bx1), max(ay1, by1)]
             scores = [s for s in (other.get("score"), box.get("score")) if s is not None]
             if scores:
                 union["score"] = max(scores)
+            if label_conflict_duplicate:
+                union["label_candidates"] = list(dict.fromkeys([
+                    *(other.get("label_candidates") or [other["label"]]),
+                    *(box.get("label_candidates") or [box["label"]]),
+                ]))
+                union["dedupe_label_conflict"] = True
             kept[index] = union
             merged += 1
             break
