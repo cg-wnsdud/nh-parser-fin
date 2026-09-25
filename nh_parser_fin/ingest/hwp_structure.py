@@ -155,7 +155,7 @@ def normalize_kordoc(raw: dict[str, Any], *, parser_version: str = "unknown") ->
     }
 
 
-def parse_hwp_structure(path: Path) -> dict[str, Any]:
+def _parse_hwp_structure_kordoc(path: Path) -> dict[str, Any]:
     """Kordoc CLI를 별도 프로세스로 호출한다.
 
     문서 데이터는 로컬 프로세스의 파일 인자로만 전달된다. 이 함수는 네트워크 API에
@@ -178,6 +178,48 @@ def parse_hwp_structure(path: Path) -> dict[str, Any]:
         raise RuntimeError(f"Kordoc 구조 파싱 실패: {raw.get('error') or 'unknown error'}")
     version = os.environ.get("KORDOC_VERSION", "4.14.1")
     return normalize_kordoc(raw, parser_version=version)
+
+
+def parse_hwp_structure(path: Path) -> dict[str, Any]:
+    """HWP 구조는 사내 ``document-processor``를 우선하고 Kordoc으로 폴백한다.
+
+    운영 컨테이너에 사내 패키지가 설치되어 있으면 Java/JAR 기반 HWP→HWPX 변환과
+    DocIR 파싱만 로컬에서 수행한다. 패키지가 없거나 해당 문서를 읽지 못하면 기존
+    Kordoc 경로를 사용한다. ``HWP_STRUCTURE_ENGINE``을 ``document_processor`` 또는
+    ``kordoc``으로 지정하면 한 경로만 강제할 수 있다.
+    """
+    engine = os.environ.get("HWP_STRUCTURE_ENGINE", "auto").strip().lower()
+    if engine not in {"auto", "document_processor", "kordoc"}:
+        raise RuntimeError(f"지원하지 않는 HWP_STRUCTURE_ENGINE: {engine}")
+
+    document_processor_error: Exception | None = None
+    if engine in {"auto", "document_processor"}:
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+
+            from .docir_structure import hwp_structure_from_docir, load_docir
+
+            try:
+                parser_version = version("document-processor")
+            except PackageNotFoundError:
+                parser_version = "workspace"
+            return hwp_structure_from_docir(
+                load_docir(path), parser_version=parser_version,
+            )
+        except Exception as exc:
+            document_processor_error = exc
+            if engine == "document_processor":
+                raise RuntimeError(f"document-processor HWP 구조 파싱 실패: {exc}") from exc
+
+    try:
+        return _parse_hwp_structure_kordoc(path)
+    except Exception as kordoc_error:
+        if document_processor_error is not None:
+            raise RuntimeError(
+                "HWP 구조 파서가 모두 실패했습니다: "
+                f"document-processor={document_processor_error}; kordoc={kordoc_error}"
+            ) from kordoc_error
+        raise
 
 
 def repartition_by_rendered_text(

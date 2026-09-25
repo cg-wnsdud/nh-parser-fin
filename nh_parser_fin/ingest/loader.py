@@ -39,6 +39,9 @@ class LabPage:
     origin: dict = field(default_factory=dict)
     digital_lines: list[dict] = field(default_factory=list)
     hwp_structure: dict | None = None
+    structured_blocks: list[dict] = field(default_factory=list)
+    structured_route: str = "visual"
+    structure_probe: dict = field(default_factory=dict)
 
     @property
     def aspect(self) -> float:
@@ -89,10 +92,14 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
     import pypdfium2 as pdfium
 
     from .canvas import native_image_dpi, render_pdf_page
-    from .triage import triage_page
+    from .triage import extract_digital_lines, triage_page
 
     pages: list[LabPage] = []
     pdf = pdfium.PdfDocument(str(path))
+    docir = None
+    docir_attempted = False
+    docir_error: str | None = None
+    structured_mode = os.environ.get("STRUCTURED_DOCUMENT_ROUTE", "auto").strip().lower()
     for index, pdf_page in enumerate(pdf):
         width_pt, height_pt = pdf_page.get_size()
         verdict = triage_page(pdf_page)
@@ -111,11 +118,59 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
             dpi = max(1, min(dpi_asis, fit))   # 확대 금지
 
         canvas = render_pdf_page(pdf_page, index + 1, dpi=int(round(dpi)))
+        dpi_used = int(round(dpi))
+        digital_lines: list[dict] = []
+        if verdict.verdict in ("structured", "hybrid"):
+            digital_lines = [
+                line.model_dump(mode="json")
+                for line in extract_digital_lines(pdf_page, dpi_used / 72.0)
+            ]
+
+        structured_blocks: list[dict] = []
+        structured_route = "visual"
+        structure_probe: dict = {}
+        if structured_mode not in {"off", "false", "0"} and verdict.verdict == "structured":
+            if not docir_attempted:
+                docir_attempted = True
+                try:
+                    from .docir_structure import load_docir
+
+                    docir = load_docir(path)
+                except Exception as exc:
+                    docir_error = f"{type(exc).__name__}: {exc}"
+            if docir is not None:
+                try:
+                    from .docir_structure import pdf_page_structure
+
+                    structured = pdf_page_structure(
+                        docir,
+                        page_no=index + 1,
+                        canvas=canvas.image.size,
+                        digital_lines=digital_lines,
+                    )
+                    structured_blocks = structured.blocks
+                    structured_route = structured.route
+                    structure_probe = structured.metrics
+                except Exception as exc:
+                    structured_route = "visual"
+                    structure_probe = {
+                        "parser": "document_processor",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+            elif docir_error:
+                structure_probe = {
+                    "parser": "document_processor",
+                    "error": docir_error,
+                }
         pages.append(LabPage(
             doc_id=path.stem,
             source_file=path.name,
             page_no=index + 1,
             image=canvas.image,
+            digital_lines=digital_lines,
+            structured_blocks=structured_blocks,
+            structured_route=structured_route,
+            structure_probe=structure_probe,
             origin={
                 "kind": "pdf",
                 "page_pt": [round(width_pt, 1), round(height_pt, 1)],
@@ -124,8 +179,10 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                 "triage": verdict.verdict,
                 "native_image_dpi": native,
                 "dpi_asis": round(dpi_asis, 1),
-                "dpi_used": int(round(dpi)),
+                "dpi_used": dpi_used,
                 "sent_px": list(canvas.image.size),
+                "processing_route": structured_route,
+                "structure_probe": structure_probe,
             },
         ))
     return pages
@@ -184,6 +241,40 @@ def _hwp_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                         line.model_dump(mode="json")
                         for line in extract_digital_lines(pdf_page, px_per_pt)
                     ]
+                structured_blocks: list[dict] = []
+                structured_route = "visual"
+                structure_probe: dict = {}
+                surface = render_info.get("review_surface") or {}
+                dom_rows = surface.get("dom_rows") or []
+                if render_info.get("backend") == "document_processor_html" and dom_rows:
+                    from .hwp_html import dom_rows_to_blocks
+
+                    css_size = surface.get("page_css_size") or [width_pt * 4 / 3, height_pt * 4 / 3]
+                    structured_blocks = dom_rows_to_blocks(
+                        dom_rows,
+                        page_no=page_no,
+                        canvas=canvas.image.size,
+                        page_css_size=(float(css_size[0]), float(css_size[1])),
+                    )
+                    # 재구성 HTML이 선언한 빈 페이지에는 OCR을 호출하지 않는다.
+                    # 009 HWP는 page_count=2지만 둘째 쪽에 DOM 행과 디지털 텍스트가
+                    # 모두 없었다. 구조가 있는 페이지는 3개 이상일 때 fast path,
+                    # 실제 텍스트가 있는데 DOM 행이 없으면 시각 경로로 보수적으로 남긴다.
+                    if not structured_blocks and not digital:
+                        structured_route = "structured_fast"
+                    elif len(structured_blocks) >= 3:
+                        augment = os.environ.get("HWP_VISUAL_AUGMENT", "on").strip().lower()
+                        structured_route = (
+                            "structured_fast"
+                            if augment in {"off", "false", "0"}
+                            else "hybrid"
+                        )
+                    structure_probe = {
+                        "parser": "document_processor_html_dom",
+                        "blocks": len(structured_blocks),
+                        "table_rows": sum(block.get("kind") == "table" for block in structured_blocks),
+                        "coordinate_surface": "reconstructed_html",
+                    }
                 pages.append(LabPage(
                     doc_id=path.stem,
                     source_file=path.name,
@@ -191,6 +282,9 @@ def _hwp_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                     image=canvas.image,
                     digital_lines=digital,
                     hwp_structure=None,
+                    structured_blocks=structured_blocks,
+                    structured_route=structured_route,
+                    structure_probe=structure_probe,
                     origin={
                         "kind": "hwp",
                         "render": render_info,
@@ -203,6 +297,8 @@ def _hwp_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                         "dpi_asis": round(dpi_asis, 1),
                         "dpi_used": dpi_used,
                         "sent_px": list(canvas.image.size),
+                        "processing_route": structured_route,
+                        "structure_probe": structure_probe,
                         "structure_parser": structure["parser"],
                         "structure_parser_version": structure["parser_version"],
                         "structure_page_count": structure["page_count"],

@@ -68,10 +68,11 @@ def _compact_table(
             header_rows.add(row)
     compact["header_rows"] = sorted(header_rows)
     compact["rows"] = matrix
-    notes = [
-        str(note.get("text") or "").strip() for note in table.get("notes") or []
-        if str(note.get("text") or "").strip()
-    ]
+    notes = []
+    for note in table.get("notes") or []:
+        value = str(note.get("text") or "").strip() if isinstance(note, dict) else str(note).strip()
+        if value:
+            notes.append(value)
     if notes:
         compact["notes"] = notes
     return compact
@@ -117,6 +118,10 @@ def _text_source(region: dict[str, Any]) -> str:
         return "digital"
     if source.startswith("hwp_structure"):
         return "hwp"
+    if source.startswith("document_processor_html"):
+        return "hwp"
+    if source.startswith("document_processor"):
+        return "digital"
     return "ocr"
 
 

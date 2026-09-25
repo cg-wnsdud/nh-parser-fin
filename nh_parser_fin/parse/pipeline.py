@@ -56,10 +56,11 @@ def _prepare_page(page: dict[str, Any]) -> dict[str, Any]:
     prepared = copy.deepcopy(page)
     page_no = int(prepared["page_no"])
     for region_order, region in enumerate(prepared.get("regions") or [], start=1):
-        region["origin"] = "paddlex"
+        structured_source = (region.get("structured") or {}).get("source")
+        region["origin"] = "document_processor" if structured_source else "paddlex"
         region["engine_order"] = region_order
-        region["bbox_source"] = "paddlex_layout"
-        region["bbox_quality"] = "exact"
+        region.setdefault("bbox_source", "paddlex_layout")
+        region.setdefault("bbox_quality", "exact")
         for index, line in enumerate(region.get("lines") or []):
             line["line_ref"] = f"p{page_no}/{region['region_id']}/L{index:03d}"
     for index, line in enumerate(prepared.get("unassigned_lines") or []):
@@ -118,7 +119,10 @@ def _assign_reading_order(page: dict[str, Any]) -> None:
     전체 y 정렬은 2단 문서의 좌우 열을 교차시키므로 사용하지 않는다. 같은 대상에
     붙는 복구 후보끼리만 원본 bbox의 y/x 순서로 배치한다.
     """
-    original = [region for region in page["regions"] if region.get("origin") == "paddlex"]
+    original = [
+        region for region in page["regions"]
+        if region.get("origin") in {"paddlex", "document_processor"}
+    ]
     recovered = [region for region in page["regions"] if region.get("origin") == "recovery"]
     attached: dict[str, list[dict[str, Any]]] = {}
     unattached = []
@@ -326,6 +330,28 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
     _promote_vlm_table_areas(page)
     placed = 0
     for region in page.get("regions") or []:
+        existing_table = region.get("table") or {}
+        if existing_table.get("source") == "document_processor":
+            # PDF 내부 셀과 bbox에서 직접 복원한 표 행이다. 같은 crop을 VLM으로 다시
+            # 배치하면 정확한 셀을 근사 결과로 덮게 되므로 구조를 그대로 신뢰한다.
+            region["kind"] = "table"
+            region["table_status"] = "complete"
+            cells = [
+                cell for cell in existing_table.get("cells") or []
+                if str(cell.get("text") or "").strip()
+            ]
+            slots = max(
+                1,
+                int((existing_table.get("grid") or {}).get("rows") or 1)
+                * int((existing_table.get("grid") or {}).get("cols") or 1),
+            )
+            region["table_cell_density"] = round(len(cells) / slots, 4)
+            region["text_candidates"] = {
+                **(region.get("text_candidates") or {}),
+                "table_grid": str(region.get("text") or ""),
+            }
+            placed += 1
+            continue
         lines = [line for line in region.get("lines") or [] if line.get("bbox")]
         # PaddleX 라벨은 `region["label"]` 이 아니라 `layout_observation` 안에 있다.
         # 키를 잘못 읽는 바람에 "PaddleX 가 table 이라 부른 영역" 경로가 한 번도

@@ -102,7 +102,8 @@ def build_page_evidence(
     regions: list[dict[str, Any]] = []
     for sequence, (_, block) in enumerate(ordered, start=1):
         content = str(block.get("content") or "").strip()
-        regions.append({
+        block_text_source = str(block.get("text_source") or "paddlex_block_content")
+        region = {
             "region_id": f"p{page_no}_r{sequence:03d}",
             "page_no": page_no,
             "sequence": sequence,
@@ -116,7 +117,8 @@ def build_page_evidence(
             "product_id": None,
             "ownership_status": "pending",
             "text": content,
-            "text_source": "paddlex_block_content" if content else "pending_line_fallback",
+            "text_source": block_text_source if content else "pending_line_fallback",
+            "block_text_source": block_text_source,
             "text_candidates": {
                 "paddlex_block_content": content or None,
                 "line_assembled": None,
@@ -129,7 +131,13 @@ def build_page_evidence(
             "content_gap_candidates": [],
             "parent_id": None,
             "child_ids": [],
-        })
+        }
+        # 디지털 구조 파서가 이미 준 표/출처/정확도는 뒤 단계에서 다시 추론하지 않도록
+        # Region에 그대로 전달한다. PaddleX 블록에는 이 필드가 없어 기존 동작과 같다.
+        for key in ("kind", "table", "bbox_source", "bbox_quality", "structured"):
+            if key in block:
+                region[key] = block[key]
+        regions.append(region)
 
     unassigned: list[dict[str, Any]] = []
 
@@ -237,7 +245,7 @@ def build_page_evidence(
                 conflict_regions += 1
         elif block_text:
             region["text"] = block_text
-            region["text_source"] = "paddlex_block_content"
+            region["text_source"] = region.get("block_text_source") or "paddlex_block_content"
             region["text_selection_status"] = "paddlex_only"
         elif line_text:
             region["text"] = line_text
