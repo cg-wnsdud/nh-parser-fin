@@ -256,18 +256,27 @@ def align_hwp_structure(page: dict[str, Any]) -> dict[str, int]:
         if not candidates:
             continue
         score, balance, cell_coverage, region = max(candidates, key=lambda item: (item[0], item[1]))
-        region["table"] = _source_table_grid(table)
-        region["table_status"] = "complete"
-        region["table_structure_source"] = "kordoc"
-        region["table_geometry_status"] = "region_bbox_only"
-        region["kind"] = "table"
+        existing_table = region.get("table") or {}
+        coordinate_table = existing_table.get("source") == "document_processor"
+        if coordinate_table:
+            # HTML DOM에서 화면 셀 bbox까지 복원한 표가 Kordoc의 좌표 없는 논리 표보다
+            # 강한 근거다. Kordoc은 일치 검증에만 쓰고 셀/머리글을 덮지 않는다.
+            region["hwp_table_candidate"] = _source_table_grid(table)
+            region["table_structure_source"] = "document_processor_html+kordoc_validation"
+            region["table_geometry_status"] = "cell_bbox_exact"
+        else:
+            region["table"] = _source_table_grid(table)
+            region["table_status"] = "complete"
+            region["table_structure_source"] = "kordoc"
+            region["table_geometry_status"] = "region_bbox_only"
+            region["kind"] = "table"
         region["hwp_table_match"] = {
             "source_id": table["source_id"],
             "score": round(score, 4),
             "length_balance": round(balance, 4),
             "cell_coverage": round(cell_coverage, 4),
         }
-        if cell_coverage == 1.0 and balance >= 0.8:
+        if not coordinate_table and cell_coverage == 1.0 and balance >= 0.8:
             previous = str(region.get("text") or "")
             source_text = str(table.get("text") or "")
             if _normalized(previous) != _normalized(source_text):

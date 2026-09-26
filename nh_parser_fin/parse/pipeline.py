@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from .semantic import (
     analyze_page_context,
     analyze_product_labels,
     constrain_title_labels,
+    constrain_rate_calculation_labels,
     explicit_heading_evidence,
 )
 from .templates import (
@@ -52,6 +54,38 @@ def _media_map(tasks: list[dict[str, Any]], media_dir: Path) -> dict[tuple[str, 
     return output
 
 
+def _structure_duplicate_candidate(
+    candidate: dict[str, Any], regions: list[dict[str, Any]],
+) -> bool:
+    """여러 구조 행을 한꺼번에 반복한 OCR 복구 후보인지 판정한다."""
+    bbox = candidate.get("bbox") or []
+    text = "".join(str(candidate.get("text") or "").split()).casefold()
+    if len(bbox) != 4 or len(text) < 20:
+        return False
+    bx0, by0, bx1, by1 = (int(value) for value in bbox)
+    enclosed: list[str] = []
+    for region in regions:
+        if region.get("origin") != "document_processor":
+            continue
+        other = region.get("bbox") or []
+        if len(other) != 4:
+            continue
+        ax0, ay0, ax1, ay1 = (int(value) for value in other)
+        area = max(1, (ax1 - ax0) * (ay1 - ay0))
+        intersection = (
+            max(0, min(ax1, bx1) - max(ax0, bx0))
+            * max(0, min(ay1, by1) - max(ay0, by0))
+        )
+        value = "".join(str(region.get("text") or "").split()).casefold()
+        if intersection / area >= 0.8 and value:
+            enclosed.append(value)
+    if len(enclosed) < 3:
+        return False
+    known = "".join(enclosed)
+    shared = sum((Counter(text) & Counter(known)).values())
+    return shared / len(text) >= 0.72
+
+
 def _prepare_page(page: dict[str, Any]) -> dict[str, Any]:
     prepared = copy.deepcopy(page)
     page_no = int(prepared["page_no"])
@@ -70,8 +104,26 @@ def _prepare_page(page: dict[str, Any]) -> dict[str, Any]:
     # 상품 소유권을 알기 전에 같은 높이의 줄을 표 하나로 합치면 좌우 상품의 표가
     # 하나가 된다. 여기서는 작은 복구 후보로만 보존하고, 페이지 전체를 보는 의미
     # 판정이 product_id와 table_areas를 정한 뒤 같은 상품 안에서만 합친다.
+    recovery_candidates = build_recovery_candidates(unassigned, page_no=page_no)
+    structure_duplicates = [
+        candidate for candidate in recovery_candidates
+        if _structure_duplicate_candidate(candidate, prepared.get("regions") or [])
+    ]
+    duplicate_refs = {
+        line_ref
+        for candidate in structure_duplicates
+        for line_ref in candidate.get("line_refs") or []
+    }
+    prepared["structure_duplicate_lines"] = [
+        copy.deepcopy(line)
+        for line in unassigned
+        if line.get("line_ref") in duplicate_refs
+    ]
+    prepared["unassigned_lines"] = [
+        line for line in unassigned if line.get("line_ref") not in duplicate_refs
+    ]
     prepared["recovery_candidates"] = sorted(
-        build_recovery_candidates(unassigned, page_no=page_no),
+        [candidate for candidate in recovery_candidates if candidate not in structure_duplicates],
         key=lambda item: ((item.get("bbox") or [0, 0])[1], (item.get("bbox") or [0, 0])[0]),
     )
     return prepared
@@ -476,6 +528,7 @@ def _label_pages(
                     label for label in decision["labels"] if label not in selected
                 ]
                 selected = constrain_title_labels(region, selected)
+                selected = constrain_rate_calculation_labels(region, selected)
                 region["semantic_labels"] = selected
                 decision["labels"] = list(selected)
                 evidence = [

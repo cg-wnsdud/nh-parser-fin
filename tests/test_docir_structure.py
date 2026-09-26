@@ -121,6 +121,42 @@ def test_structured_table_survives_evidence_and_skips_vlm_cell_reconstruction():
     assert row["table"]["cells"][1]["text"] == "2년"
 
 
+def test_prepare_page_suppresses_page_sized_ocr_copy_of_structured_rows():
+    regions = []
+    rows = [
+        ("대출대상\n직장인 고객", [100, 100, 900, 200]),
+        ("대출한도\n최대 3억원", [100, 200, 900, 300]),
+        ("대출기간\n2년 이내", [100, 300, 900, 400]),
+        ("준비서류\n재직확인서류", [100, 400, 900, 500]),
+    ]
+    for index, (text, bbox) in enumerate(rows, start=1):
+        regions.append({
+            "region_id": f"p1_r{index:03d}",
+            "bbox": bbox,
+            "text": text,
+            "text_source": "document_processor_html",
+            "structured": {"source": "document_processor"},
+            "lines": [],
+        })
+    page = {
+        "page_no": 1,
+        "canvas": [1000, 1000],
+        "regions": regions,
+        "unassigned_lines": [{
+            "bbox": [80, 80, 920, 520],
+            "text": "대출 대상 직장인고객 대출한도 최대3억원 대출 기간 2년이내 준비서류 재직확인서류",
+            "source": "ocr",
+        }],
+    }
+
+    prepared = _prepare_page(page)
+
+    assert prepared["recovery_candidates"] == []
+    assert prepared["unassigned_lines"] == []
+    assert len(prepared["raw_unassigned_lines"]) == 1
+    assert len(prepared["structure_duplicate_lines"]) == 1
+
+
 def test_scan_like_docir_page_stays_on_visual_route():
     docir = _fixture_docir()
     docir.pages[0].parse_status = "skipped"
@@ -196,4 +232,6 @@ def test_hwp_dom_rows_become_separate_display_exact_regions():
     assert blocks[0]["bbox"] == [200, 600, 1400, 720]
     assert blocks[1]["bbox"] == [200, 720, 1400, 840]
     assert blocks[0]["bbox_quality"] == "display_exact"
-    assert blocks[0]["table"]["cells"][1]["col_span"] == 2
+    assert blocks[0]["table"]["grid"] == {"rows": 1, "cols": 2}
+    assert [cell["col"] for cell in blocks[0]["table"]["cells"]] == [0, 1]
+    assert blocks[0]["table"]["cells"][0]["is_header"] is True

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import sys
 import time
@@ -82,12 +83,21 @@ def _novel_visual_blocks(
 ) -> tuple[list[dict], int]:
     """구조 Region에 이미 표현된 Paddle 블록을 버리고 시각 전용 요소만 남긴다."""
     normalize = lambda value: "".join(str(value or "").split()).casefold()
+
+    def character_coverage(left: str, right: str) -> float:
+        """OCR 오탈자를 허용하며 left가 right로 얼마나 설명되는지 계산한다."""
+        if not left or not right:
+            return 0.0
+        shared = sum((Counter(left) & Counter(right)).values())
+        return shared / len(left)
+
     kept: list[dict] = []
     discarded = 0
     for block in visual:
         bbox = block.get("bbox") or []
         text = normalize(block.get("content"))
         duplicate = False
+        enclosed_texts: list[str] = []
         if len(bbox) == 4:
             bx0, by0, bx1, by1 = (int(value) for value in bbox)
             block_area = max(1, (bx1 - bx0) * (by1 - by0))
@@ -101,18 +111,90 @@ def _novel_visual_blocks(
                 if x_share < 0.8 or y_share < 0.8:
                     continue
                 known_area = max(1, (ax1 - ax0) * (ay1 - ay0))
-                area_ratio = min(block_area, known_area) / max(block_area, known_area)
+                intersection = (
+                    max(0, min(ax1, bx1) - max(ax0, bx0))
+                    * max(0, min(ay1, by1) - max(ay0, by0))
+                )
                 known_text = normalize(known.get("content"))
+                if intersection / known_area >= 0.8 and known_text:
+                    enclosed_texts.append(known_text)
+                area_ratio = min(block_area, known_area) / max(block_area, known_area)
                 same_geometry = x_share >= 0.95 and y_share >= 0.95 and area_ratio >= 0.75
                 text_already_present = bool(text and known_text and text in known_text)
-                if same_geometry or text_already_present:
+                same_text_with_ocr_noise = (
+                    x_share >= 0.9
+                    and y_share >= 0.9
+                    and len(text) >= 8
+                    and character_coverage(text, known_text) >= 0.8
+                    and (
+                        character_coverage(known_text, text) >= 0.8
+                        # 시각 블록이 구조 행의 일부만 잘라 잡은 경우도 중복이다.
+                        or character_coverage(text, known_text) >= 0.85
+                    )
+                )
+                if same_geometry or text_already_present or same_text_with_ocr_noise:
                     duplicate = True
                     break
+            # Paddle은 HWP 한 페이지의 표 전체를 text 블록 하나로 되돌려주기도 한다.
+            # 구조 파서는 이미 그 안을 행별 exact/display_exact bbox로 나눴으므로, 큰
+            # 블록의 내용 대부분이 내부 행들의 합집합에 있으면 보완 요소가 아니라
+            # 중복 컨테이너다. 문자 multiset을 쓰는 이유는 OCR의 줄 순서 뒤섞임과
+            # 띄어쓰기 차이를 허용하기 위해서다.
+            if (
+                not duplicate
+                and len(enclosed_texts) >= 3
+                and len(text) >= 20
+                and character_coverage(text, "".join(enclosed_texts)) >= 0.72
+            ):
+                duplicate = True
         if duplicate:
             discarded += 1
         else:
             kept.append(block)
     return kept, discarded
+
+
+def _attach_visual_supplements(
+    visual: list[dict], structured: list[dict],
+) -> tuple[list[dict], int]:
+    """구조 표 행 안의 신규 시각 문구를 별도 겹침 Region 대신 행 주석으로 합친다."""
+    free: list[dict] = []
+    attached = 0
+    for block in visual:
+        bbox = block.get("bbox") or []
+        text = str(block.get("content") or "").strip()
+        candidates: list[tuple[int, dict]] = []
+        if len(bbox) == 4 and text:
+            bx0, by0, bx1, by1 = (int(value) for value in bbox)
+            block_area = max(1, (bx1 - bx0) * (by1 - by0))
+            for known in structured:
+                if known.get("kind") != "table" or not known.get("table"):
+                    continue
+                other = known.get("bbox") or []
+                if len(other) != 4:
+                    continue
+                ax0, ay0, ax1, ay1 = (int(value) for value in other)
+                intersection = (
+                    max(0, min(ax1, bx1) - max(ax0, bx0))
+                    * max(0, min(ay1, by1) - max(ay0, by0))
+                )
+                if intersection / block_area >= 0.8:
+                    candidates.append((max(1, (ax1 - ax0) * (ay1 - ay0)), known))
+        if not candidates:
+            free.append(block)
+            continue
+        _, target = min(candidates, key=lambda item: item[0])
+        target["content"] = f"{str(target.get('content') or '').rstrip()}\n{text}".strip()
+        target["text_source"] = "document_processor_html_with_visual_supplement"
+        table = target.setdefault("table", {})
+        notes = table.setdefault("notes", [])
+        if text not in notes:
+            notes.append(text)
+        target.setdefault("visual_supplements", []).append({
+            "bbox": list(bbox), "text": text, "source": "paddlex_visual",
+        })
+        attached += 1
+    return free, attached
 
 
 def main() -> None:
@@ -187,8 +269,11 @@ def main() -> None:
                 novel, suppressed = _novel_visual_blocks(
                     visual_parsing, page.structured_blocks,
                 )
+                novel, attached = _attach_visual_supplements(
+                    novel, page.structured_blocks,
+                )
                 parsing = [dict(block) for block in page.structured_blocks] + novel
-                merged_parsing += suppressed
+                merged_parsing += suppressed + attached
             elif page.structured_route != "structured_fast":
                 parsing = visual_parsing
 

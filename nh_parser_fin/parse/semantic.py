@@ -104,8 +104,11 @@ LABEL_NEGATIVE_EXAMPLES = {
     "금리": "대출금리 또는 금리 변동 가능성만 경고하는 유의사항",
     "우대금리": "우대금리가 변경될 수 있다는 경고만 있는 문장",
     "대출대상": "대출자격이 변경될 수 있다는 유의사항",
-    "대출한도": "대출한도가 신용도에 따라 달라질 수 있다는 유의사항",
+    "대출한도": "대출한도가 달라질 수 있다는 유의사항 또는 금리 산정 예시의 가정 대출금액",
+    "대출기간": "대출금리 산정 예시에서 금리 계산 전제로만 제시한 기간",
     "대출금리": "대출금리가 변경될 수 있다는 유의사항",
+    "상환방법": "대출금리 산정 예시에서 금리 계산 전제로만 언급한 상환방식",
+    "채권보전": "대출금리 산정 예시에서 금리 계산 전제로만 언급한 담보·보증",
     "상품명": "일반 명사나 다른 상품을 비교 목적으로 언급한 문구",
     "유의사항": "가입대상·금액·기간·금리 값을 항목별로 제시한 조건표",
 }
@@ -246,6 +249,20 @@ def constrain_title_labels(region: dict[str, Any], labels: list[str]) -> list[st
         if "상품명" in labels:
             return ["상품명"]
     return labels
+
+
+def constrain_rate_calculation_labels(region: dict[str, Any], labels: list[str]) -> list[str]:
+    """금리 산정 예시의 가정값이 기간·한도·상환조건으로 번지는 것을 막는다."""
+    text = "".join(str(region.get("text") or "").split()).casefold()
+    markers = sum(value in text for value in ("기준금리", "가산금리", "우대금리"))
+    is_rate_example = markers >= 2 and ("적용시" in text or "기준," in text)
+    if not is_rate_example or "대출금리" not in labels:
+        return labels
+    headings = explicit_heading_evidence(region.get("text"), labels)
+    return [
+        label for label in labels
+        if label == "대출금리" or label in headings
+    ]
 
 
 # ── 1단계 · 소유권 ──────────────────────────────────────────────────
@@ -754,6 +771,9 @@ def analyze_product_labels(
   항목을 가져오면 안 됩니다.
 - 유의사항 문장에 `대출한도`, `대출금리`라는 단어가 언급되더라도 그 문장이 해당
   항목의 실제 값을 설명하는 것이 아니면 그 라벨을 붙이지 마세요.
+- 기준금리·가산금리·우대금리로 최종 대출금리를 설명하는 산정 예시 안의 대출금액,
+  대출기간, 상환방식, 신용등급, 담보는 계산 전제입니다. 별도 표제어가 없는 한 해당
+  Region에는 `대출금리`만 붙이고 전제 항목의 라벨은 붙이지 마세요.
 - 짧은 상품 제목 Region에는 상품명 외의 페이지 구분값을 붙이지 마세요.
 
 페이지 크기: {page['canvas']}

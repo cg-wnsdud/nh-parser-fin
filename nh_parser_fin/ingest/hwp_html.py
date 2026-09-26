@@ -338,14 +338,21 @@ def dom_rows_to_blocks(
                 continue
             cells.append({
                 "row": 0,
-                "col": int(cell.get("col") or 0),
+                "col": 0,
                 "row_span": max(1, int(cell.get("row_span") or 1)),
-                "col_span": max(1, int(cell.get("col_span") or 1)),
+                "col_span": 1,
                 "is_header": len(cells) == 0 and len(row.get("cells") or []) > 1,
                 "text": text,
                 "bbox": cell_bbox,
                 "node_id": str(cell.get("node_id") or ""),
             })
+        # 중첩 표는 각 계층의 col 번호가 다시 0/1부터 시작해 서로 충돌한다.
+        # 한 화면 행의 P3 표현에서는 실제 x 순서가 정답이므로, 보이는 셀을 왼쪽부터
+        # 연속 열로 다시 번호 매긴다. 행 머리글과 내부 값 셀이 같은 칸을 덮지 않는다.
+        cells.sort(key=lambda item: (item["bbox"][0], item["bbox"][1]))
+        for col, cell in enumerate(cells):
+            cell["col"] = col
+            cell["is_header"] = col == 0 and len(cells) > 1
         text = "\n".join(cell["text"] for cell in cells)
         if bbox is None or not text:
             continue
@@ -366,12 +373,12 @@ def dom_rows_to_blocks(
             },
         }
         if is_table:
-            cols = max(cell["col"] + cell["col_span"] for cell in cells)
+            cols = len(cells)
             block["table"] = {
                 "source": "document_processor",
                 "grid": {"rows": 1, "cols": max(1, cols)},
                 "cells": cells,
-                "notes": ["reconstructed_html_dom"],
+                "notes": [],
             }
         blocks.append(block)
     blocks.sort(key=lambda block: (block["bbox"][1], block["bbox"][0]))

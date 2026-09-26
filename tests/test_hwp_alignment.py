@@ -66,6 +66,44 @@ def test_small_structural_table_replaces_vlm_guess_but_keeps_region_bbox():
     assert region["table"]["grid"] == {"rows": 2, "cols": 2}
 
 
+def test_kordoc_table_does_not_replace_dom_table_with_cell_bboxes():
+    dom_table = {
+        "source": "document_processor",
+        "grid": {"rows": 1, "cols": 3},
+        "cells": [
+            {"row": 0, "col": 0, "text": "원금 및 이자 상환방법", "is_header": True,
+             "bbox": [0, 0, 100, 50]},
+            {"row": 0, "col": 1, "text": "만기일시상환", "bbox": [100, 0, 200, 50]},
+            {"row": 0, "col": 2, "text": "매월 이자 납부", "bbox": [200, 0, 400, 50]},
+        ],
+        "notes": [],
+    }
+    region = {
+        "region_id": "p1_r001", "bbox": [0, 0, 400, 50],
+        "text": "원금 및 이자 상환방법\n만기일시상환\n매월 이자 납부",
+        "text_source": "document_processor_html", "text_candidates": {},
+        "table": dom_table, "table_status": "complete", "kind": "table",
+    }
+    page = {"regions": [region], "hwp_structure": {
+        "paragraphs": [], "tables": [{
+            "source_id": "t1", "rows": 1, "cols": 2, "has_header": False,
+            "role_hint": "data_table_candidate",
+            "text": "만기일시상환\n매월 이자 납부",
+            "cells": [
+                {"row": 0, "col": 0, "text": "만기일시상환"},
+                {"row": 0, "col": 1, "text": "매월 이자 납부"},
+            ],
+        }]},
+    }
+
+    align_hwp_structure(page)
+
+    assert region["table"] is dom_table
+    assert region["table"]["grid"] == {"rows": 1, "cols": 3}
+    assert region["table"]["cells"][0]["text"] == "원금 및 이자 상환방법"
+    assert region["table_structure_source"] == "document_processor_html+kordoc_validation"
+
+
 def test_hwp_structure_replaces_duplicated_pdf_text_when_coverage_is_high():
     region = {
         "region_id": "p1_r001", "bbox": [0, 0, 500, 500],
