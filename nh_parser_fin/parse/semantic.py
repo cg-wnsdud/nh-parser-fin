@@ -576,6 +576,9 @@ def analyze_page_context(
         for area in result.get("table_areas") or []:
             box = [float(value) for value in area.get("approx_bbox_pct") or []]
             if len(box) != 4:
+                # 현재 페이지 판정 스키마는 member_ids만 요구한다. 좌표가
+                # 없다는 이유로 긴 페이지의 표 후보를 통째로 버리면 안 된다.
+                combined["table_areas"].append(copy.deepcopy(area))
                 continue
             combined["table_areas"].append({
                 **area,

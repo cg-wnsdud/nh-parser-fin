@@ -56,6 +56,13 @@ def normalize_region_ids(pages: list[dict[str, Any]]) -> None:
             mapping[old_id] = new_id
             sources[old_id] = str(region.get("source_region_id") or old_id)
 
+        # VLM이 지목한 표 구성원이 병합되어 사라졌다면 살아남은 표 Region으로
+        # 참조를 옮긴다. 원래 구성원 목록은 source_member_ids에 보존한다.
+        for region in regions:
+            target = mapping[str(region["region_id"])]
+            for old_id in region.get("merged_from") or []:
+                mapping.setdefault(str(old_id), target)
+
         page["region_id_map"] = [
             {
                 "region_id": mapping[old_id],
@@ -87,7 +94,9 @@ def normalize_region_ids(pages: list[dict[str, Any]]) -> None:
             member_ids = [str(value) for value in area.get("member_ids") or []]
             if member_ids:
                 area.setdefault("source_member_ids", list(member_ids))
-                area["member_ids"] = [mapping.get(value, value) for value in member_ids]
+                area["member_ids"] = list(dict.fromkeys(
+                    mapping[value] for value in member_ids if value in mapping
+                ))
 
         for item in page.get("coarse_missing_candidates") or []:
             _map_decision(item, mapping)

@@ -3,6 +3,7 @@ from nh_parser_fin.parse import semantic
 from nh_parser_fin.parse import export as export_v2
 from nh_parser_fin.parse import pipeline as full_pipeline
 from nh_parser_fin.parse.ids import normalize_region_ids
+from PIL import Image
 
 
 def test_recovery_candidates_keep_exact_line_union_and_separate_rows():
@@ -196,3 +197,25 @@ def test_long_page_semantic_bands_assign_every_id_once():
     assert candidate_ids == ["x1", "x2"]
     assert len(region_ids) == len(set(region_ids))
     assert len(candidate_ids) == len(set(candidate_ids))
+
+
+def test_long_page_keeps_table_area_without_optional_bbox(monkeypatch):
+    page = {
+        "canvas": [1000, 3000],
+        "tiling": {"decision": "split", "axis": "y", "pieces": 2},
+        "regions": [
+            {"region_id": "r1", "bbox": [0, 100, 500, 200]},
+            {"region_id": "r2", "bbox": [0, 200, 500, 300]},
+        ],
+    }
+    monkeypatch.setattr(semantic, "analyze_page_ownership", lambda *args, **kwargs: {
+        "analysis": "", "products": [], "region_decisions": [],
+        "recovery_decisions": [], "missing_visible_text": [],
+        "table_areas": [{"kind": "field_list", "member_ids": ["r1", "r2"], "note": "행"}],
+    })
+
+    result = semantic.analyze_page_context(Image.new("RGB", (1000, 3000)), page, [])
+
+    assert result["table_areas"] == [
+        {"kind": "field_list", "member_ids": ["r1", "r2"], "note": "행"},
+    ]

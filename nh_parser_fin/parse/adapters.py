@@ -40,6 +40,21 @@ def _normalized(text: str | None) -> str:
     return re.sub(r"\s+", "", text or "").casefold()
 
 
+def digital_text_needs_ocr(
+    digital_lines: list[dict[str, Any]], ocr_lines: list[dict[str, Any]],
+) -> bool:
+    """문자 매핑이 깨졌거나 본문 대부분이 빠진 한국어 PDF 텍스트층을 감지한다.
+
+    OCR 자체가 충분한 한글을 읽었을 때만 비교하여, 정상적인 짧은 페이지나
+    영문 페이지의 디지털 원문을 함부로 버리지 않는다.
+    """
+    if not digital_lines:
+        return False
+    digital_hangul = sum(len(re.findall(r"[가-힣]", str(line.get("text") or ""))) for line in digital_lines)
+    ocr_hangul = sum(len(re.findall(r"[가-힣]", str(line.get("text") or ""))) for line in ocr_lines)
+    return ocr_hangul >= 100 and digital_hangul < ocr_hangul * 0.2
+
+
 def _reading_key(line: dict[str, Any]) -> tuple[int, int]:
     bbox = line.get("bbox") or [0, 0, 0, 0]
     return int(bbox[1]), int(bbox[0])
@@ -87,6 +102,9 @@ def build_page_evidence(
     조립한 결과가 ``block_content``를 무조건 덮지는 않는다. 둘의 일치도를 기록하고,
     충돌하면 후속 VLM/Judge 대상임을 명시한다.
     """
+    digital_quality_fallback = digital_text_needs_ocr(digital_lines or [], ocr_lines)
+    if digital_quality_fallback:
+        digital_lines = []
     ordered = sorted(
         enumerate(parsing),
         key=lambda pair: (
@@ -308,6 +326,10 @@ def build_page_evidence(
             "empty_regions": sum(r["text_source"] == "empty" for r in regions),
             "ocr_lines": len(ocr_lines),
             "digital_lines": len(digital_lines or []),
+            "digital_text_route": (
+                "ocr_fallback" if digital_quality_fallback
+                else "digital_primary" if digital_lines else "ocr_only"
+            ),
             "canonical_lines": len(canonical_stream),
             "unassigned_lines": len(unassigned),
             "content_gap_candidates": gap_candidates,

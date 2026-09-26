@@ -65,6 +65,18 @@ def media_index(run: Path) -> dict[tuple[str, int], Path]:
     파일명을 만들기 때문에 여기서 복원하면 어긋난다. 이미 정확한 매핑을 가진
     `label-studio.json`을 그대로 읽는다.
     """
+    compact_index = run / "media-index.json"
+    if compact_index.exists():
+        entries = json.loads(compact_index.read_text(encoding="utf-8"))
+        index: dict[tuple[str, int], Path] = {}
+        for entry in entries:
+            name = unquote(str(entry["image_name"]))
+            path = run / "images" / name
+            if not path.exists():
+                path = MEDIA_DIR / name
+            if path.exists():
+                index[(str(entry["source_file"]), int(entry["page_no"]))] = path
+        return index
     tasks = json.loads((run / "label-studio.json").read_text(encoding="utf-8"))
     index: dict[tuple[str, int], Path] = {}
     for task in tasks:
@@ -76,8 +88,29 @@ def media_index(run: Path) -> dict[tuple[str, int], Path]:
     return index
 
 
-def _table_html(table: dict[str, Any]) -> str:
-    rows, cols = int(table["grid"]["rows"]), int(table["grid"]["cols"])
+def _table_grid(table: dict[str, Any]) -> tuple[int, int, list[list[str]], list[list[bool]]]:
+    """P3 v6(`shape`+`rows`)과 v5(`grid`+`cells`)를 같은 모양으로 읽는다.
+
+    v6은 검증된 표만 `rows` 행렬을 싣고, 부분 표는 `shape`만 준다. 예전 실행의
+    리포트도 다시 만들 수 있어야 해서 두 형태를 모두 받는다.
+    """
+    if "shape" in table:                                    # v6
+        shape = table.get("shape") or [0, 0]
+        rows, cols = int(shape[0] or 0), int(shape[1] or 0)
+        matrix = table.get("rows") or []
+        header_rows = set(int(r) for r in (table.get("header_rows") or []))
+        cells = [
+            [
+                html.escape(str((matrix[r][c] if r < len(matrix) and c < len(matrix[r]) else None) or ""))
+                for c in range(cols)
+            ]
+            for r in range(rows)
+        ]
+        header = [[r in header_rows] * cols for r in range(rows)]
+        return rows, cols, cells, header
+
+    grid = table.get("grid") or {}                          # v5
+    rows, cols = int(grid.get("rows") or 0), int(grid.get("cols") or 0)
     cells = [["" for _ in range(cols)] for _ in range(rows)]
     header = [[False] * cols for _ in range(rows)]
     for cell in table.get("cells") or []:
@@ -85,15 +118,34 @@ def _table_html(table: dict[str, Any]) -> str:
         if 0 <= row < rows and 0 <= col < cols:
             cells[row][col] = html.escape(str(cell.get("text") or ""))
             header[row][col] = bool(cell.get("is_header"))
-    out = ["<table class='grid'>"]
-    for r in range(rows):
-        out.append("<tr>")
-        for c in range(cols):
-            tag = "th" if header[r][c] else "td"
-            out.append(f"<{tag}>{cells[r][c]}</{tag}>")
-        out.append("</tr>")
-    out.append("</table>")
-    notes = [str(note.get("text") or "").strip() for note in table.get("notes") or []]
+    return rows, cols, cells, header
+
+
+def _table_html(table: dict[str, Any]) -> str:
+    rows, cols, cells, header = _table_grid(table)
+    status = str(table.get("status") or "")
+    out: list[str] = []
+    # v6의 부분 표는 셀 행렬을 싣지 않는다. 격자를 비워 그리면 "값이 없다"로 오해되므로
+    # 상태를 먼저 밝히고, 내용은 아래 `최종 선택 텍스트`(OCR 원문 줄)를 보게 한다.
+    if status and status != "complete":
+        out.append(
+            f"<div class='warn'>표 구조 미검증 (<code>{html.escape(status)}</code>, "
+            f"{rows}×{cols}) — 셀 배치는 P1에만 있습니다. 내용은 아래 원문을 보세요.</div>"
+        )
+    if rows and cols and any(any(row) for row in cells):
+        out.append("<table class='grid'>")
+        for r in range(rows):
+            out.append("<tr>")
+            for c in range(cols):
+                tag = "th" if header[r][c] else "td"
+                out.append(f"<{tag}>{cells[r][c]}</{tag}>")
+            out.append("</tr>")
+        out.append("</table>")
+    # v6은 notes 가 문자열 목록, v5는 {"text": ...} 목록이다.
+    notes = [
+        str(note if isinstance(note, str) else (note or {}).get("text") or "").strip()
+        for note in table.get("notes") or []
+    ]
     notes = [value for value in notes if value]
     if notes:
         out.append("<div class='table-notes'><b>표 관련 문구</b>")
@@ -118,7 +170,11 @@ def _region_html(region: dict[str, Any]) -> str:
     else:
         chips.append("<span class='chip none'>라벨 없음</span>")
     if region.get("kind") == "table":
-        chips.append("<span class='chip alt'>표</span>")
+        # v6은 검증된 표만 셀 행렬을 싣는다. 화면에서 그 차이를 알 수 있어야
+        # "표인데 격자가 없다"를 버그로 오해하지 않는다.
+        status = str((region.get("table") or {}).get("status") or "")
+        mark = {"complete": "표", "partial": "표(미검증)"}.get(status, "표")
+        chips.append(f"<span class='chip alt'>{mark}</span>")
     if region.get("needs_review"):
         chips.append("<span class='chip rev'>검수</span>")
 
@@ -138,6 +194,55 @@ def _region_html(region: dict[str, Any]) -> str:
         f"data-rid='{html.escape(str(region['region_id']))}'>"
         f"<div class='head'><span class='rid'>{html.escape(str(region['region_id']))}</span>"
         f"{''.join(chips)}</div>{body}</li>"
+    )
+
+
+def _structures_html(page: dict[str, Any]) -> str:
+    """P3의 표 의미 짝을 Region 원문과 나란히 보여 준다."""
+    structures = page.get("semantic_structures") or []
+    if not structures:
+        return ""
+    output = ["<section class='structures'><h2>표·항목의 의미 관계 (P3)</h2>"]
+    for structure in structures:
+        title = html.escape(str(structure.get("field_label") or structure.get("kind") or "표"))
+        status = str(structure.get("status") or "unresolved")
+        output.append(
+            f"<div class='structure'><div class='head'><b>{title}</b>"
+            f"<span class='rid'>{html.escape(str(structure.get('structure_id') or ''))}</span>"
+            f"<span class='chip alt'>{html.escape(status)}</span></div>"
+        )
+        relations = structure.get("relations") or []
+        if relations:
+            output.append("<table class='relations'><tr><th>상위 분류</th><th>조건·항목</th><th>금리·내용</th><th>원문 위치</th></tr>")
+            for relation in relations:
+                context = html.escape(str(relation.get("context") or "")).replace("\n", "<br>")
+                key = html.escape(str(relation.get("key") or "")).replace("\n", "<br>")
+                value = html.escape(str(relation.get("value") or "")).replace("\n", "<br>")
+                bbox = html.escape(", ".join(str(x) for x in relation.get("bbox") or []))
+                output.append(f"<tr><td>{context}</td><td>{key}</td><td>{value}</td><td><code>{bbox}</code></td></tr>")
+            output.append("</table>")
+        else:
+            output.append("<div class='warn'>원문 줄의 의미 관계를 확인하지 못했습니다. 아래 Region 원문을 확인하세요.</div>")
+        output.append("</div>")
+    output.append("</section>")
+    return "".join(output)
+
+
+def _paddle_preview_html(preview: dict[str, Any] | None) -> str:
+    if not preview:
+        return ""
+    count = int(preview.get("paddle_table_count") or 0)
+    mode = "전체 페이지" if preview.get("whole_page_input") else f"입력 방식: {preview.get('tiling') or '미상'}"
+    full = html.escape(str(preview.get("full_image") or ""))
+    crops = "".join(
+        f"<a href='paddle-tables/{html.escape(str(name))}' target='_blank'>표 후보 {index} 확대</a> "
+        for index, name in enumerate(preview.get("crops") or [], start=1)
+    )
+    return (
+        "<details class='paddle-preview'><summary>"
+        f"Paddle 표 검출: {count}개 · {html.escape(mode)}</summary>"
+        f"<a href='paddle-tables/{full}' target='_blank'>전체 크기 PNG 열기</a> {crops}"
+        f"<img src='paddle-tables/{full}' alt='Paddle 표 검출 위치'></details>"
     )
 
 
@@ -197,8 +302,21 @@ def _summary_html(document: dict[str, Any], page: dict[str, Any]) -> str:
 
 
 def build(run: Path, title: str) -> str:
-    p3 = json.loads((run / "06-p3.json").read_text(encoding="utf-8"))
+    aggregate = run / "06-p3.json"
+    p3 = (
+        json.loads(aggregate.read_text(encoding="utf-8"))
+        if aggregate.exists()
+        else [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((run / "final").glob("*.p3.json"))
+        ]
+    )
     media = media_index(run)
+    preview_path = run / "paddle-table-index.json"
+    previews = {
+        (str(item["source_file"]), int(item["page_no"])): item
+        for item in json.loads(preview_path.read_text(encoding="utf-8"))
+    } if preview_path.exists() else {}
     tabs, panes = [], []
     missing = []
 
@@ -222,11 +340,12 @@ def build(run: Path, title: str) -> str:
             panes.append(
                 f"<section class='pane' data-key='{key}'>"
                 f"{_summary_html(document, page)}"
+                f"{_paddle_preview_html(previews.get((source_file, page_no)))}"
                 f"<div class='split'>"
                 f"<div class='left'><div class='canvas'>"
                 f"<img src='{uri}' alt='{html.escape(source_file)}'>"
                 f"{_boxes_svg(page, width, height)}</div></div>"
-                f"<div class='right'><ol class='regions'>{regions}</ol></div>"
+                f"<div class='right'>{_structures_html(page)}<ol class='regions'>{regions}</ol></div>"
                 f"</div></section>"
             )
 
@@ -253,8 +372,21 @@ body {{ margin:0; font:14px/1.6 -apple-system,"Segoe UI","Malgun Gothic",sans-se
   color:var(--ink); background:var(--bg); }}
 header {{ position:sticky; top:0; z-index:5; background:#fff;
   border-bottom:1px solid var(--line); padding:10px 16px; }}
-h1 {{ font-size:15px; margin:0 0 8px; }}
-.tabs {{ display:flex; gap:6px; flex-wrap:wrap; }}
+h1 {{ font-size:15px; margin:0; flex:none; }}
+.bar {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+/* 문서가 수십 건이면 탭 목록만으로 화면 절반을 덮는다. 기본은 접고, 지금 보고 있는
+   문서 이름을 버튼에 띄워 접힌 상태에서도 위치를 알 수 있게 한다. */
+.toggle {{ font:inherit; font-size:12px; padding:5px 10px; border:1px solid var(--line);
+  background:#fff; border-radius:6px; cursor:pointer; color:var(--ink);
+  display:flex; align-items:center; gap:8px; max-width:min(70vw, 720px); }}
+.toggle:hover {{ border-color:#9aa5b1; }}
+.toggle .who {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.toggle .count {{ color:var(--muted); flex:none; }}
+.toggle .caret {{ color:var(--muted); flex:none; transition:transform .15s; }}
+.toggle[aria-expanded="true"] .caret {{ transform:rotate(180deg); }}
+.tabs {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;
+  max-height:42vh; overflow:auto; }}
+.tabs[hidden] {{ display:none; }}
 .tab {{ font:inherit; font-size:12px; padding:5px 10px; border:1px solid var(--line);
   background:#fff; border-radius:6px; cursor:pointer; color:var(--muted); }}
 .tab:hover {{ border-color:#9aa5b1; }}
@@ -313,6 +445,22 @@ ol.regions {{ list-style:none; margin:0; padding:0; }}
 table.grid {{ border-collapse:collapse; font-size:12px; width:100%; }}
 table.grid th, table.grid td {{ border:1px solid var(--line); padding:3px 6px; }}
 table.grid th {{ background:#eef1f4; }}
+.structures {{ margin-bottom:14px; }}
+.structures h2 {{ font-size:13px; margin:0 0 6px; }}
+.structure {{ background:#fff; border:1px solid var(--line); border-radius:6px;
+  padding:8px 10px; margin-bottom:6px; }}
+table.relations {{ border-collapse:collapse; font-size:12px; width:100%; table-layout:fixed; }}
+table.relations th, table.relations td {{ border:1px solid var(--line); padding:4px 6px;
+  vertical-align:top; word-break:break-word; }}
+table.relations th {{ background:#eef1f4; }}
+table.relations th:first-child {{ width:16%; }}
+table.relations th:last-child {{ width:16%; }}
+table.relations code {{ font-size:10px; color:var(--muted); }}
+.paddle-preview {{ background:#fff; border:1px solid var(--line); border-radius:6px;
+  padding:7px 10px; margin-bottom:10px; }}
+.paddle-preview summary {{ cursor:pointer; font-weight:600; }}
+.paddle-preview a {{ margin-right:10px; font-size:12px; }}
+.paddle-preview img {{ display:block; max-width:100%; max-height:70vh; margin-top:8px; }}
 .warn {{ color:#B71C1C; font-size:12px; margin-top:4px; }}
 .warn.top {{ padding:8px 16px; background:#FFEBEE; }}
 h3 {{ font-size:12px; color:var(--muted); margin:14px 0 4px; }}
@@ -323,17 +471,42 @@ ul.orphans {{ margin:0; padding-left:18px; }}
   .left {{ position:static; }}
 }}
 </style></head><body>
-<header><h1>{title}</h1><div class="tabs">{tabs}</div></header>
+<header>
+<div class="bar"><h1>{title}</h1>
+<button type="button" id="toggle" class="toggle" aria-expanded="false" aria-controls="tabs">
+<span class="who" id="current">문서 선택</span>
+<span class="count" id="count"></span><span class="caret">&#9662;</span></button></div>
+<div class="tabs" id="tabs" hidden>{tabs}</div></header>
 {warn}
 {panes}
 <script>
 const tabs = [...document.querySelectorAll('.tab')];
 const panes = [...document.querySelectorAll('.pane')];
+const tabsBox = document.getElementById('tabs');
+const toggle = document.getElementById('toggle');
+const current = document.getElementById('current');
+document.getElementById('count').textContent = tabs.length + '개';
+
+function setOpen(open) {{
+  tabsBox.hidden = !open;
+  toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+}}
 function show(key) {{
   tabs.forEach(t => t.classList.toggle('on', t.dataset.key === key));
   panes.forEach(p => p.classList.toggle('on', p.dataset.key === key));
+  const active = tabs.find(t => t.dataset.key === key);
+  if (active) current.textContent = active.textContent.trim();
 }}
-tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.key)));
+// 탭을 고르면 목록은 닫는다 — 고르자마자 내용이 보여야 한다.
+tabs.forEach(t => t.addEventListener('click', () => {{ show(t.dataset.key); setOpen(false); }}));
+toggle.addEventListener('click', () => {{
+  const opening = tabsBox.hidden;
+  setOpen(opening);
+  if (opening) tabsBox.querySelector('.tab.on')?.scrollIntoView({{block: 'nearest'}});
+}});
+document.addEventListener('keydown', e => {{ if (e.key === 'Escape') setOpen(false); }});
+// 문서가 몇 건뿐이면 접을 이유가 없다.
+setOpen(tabs.length <= 12);
 if (tabs.length) show(tabs[0].dataset.key);
 
 // 박스와 오른쪽 항목을 양방향으로 연결한다. 어느 쪽을 봐도 짝을 찾을 수 있어야 한다.
@@ -386,8 +559,8 @@ def main() -> None:
     args = parser.parse_args()
 
     run = OUTPUT_ROOT / args.run_name
-    if not (run / "06-p3.json").exists():
-        raise SystemExit(f"06-p3.json 이 없습니다: {run}")
+    if not (run / "06-p3.json").exists() and not list((run / "final").glob("*.p3.json")):
+        raise SystemExit(f"P3 JSON이 없습니다: {run}")
     out = args.out or (run / "report.html")
     out.write_text(
         build(run, args.title or f"NH 광고물 파싱 — {args.run_name}"), encoding="utf-8",

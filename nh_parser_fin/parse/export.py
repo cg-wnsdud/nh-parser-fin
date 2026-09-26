@@ -173,6 +173,35 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             # bbox를 화면 좌표로 환산하는 데 필요한 최소 메타데이터다.
             "canvas": copy.deepcopy(page.get("canvas")),
             "regions": regions_out,
+            "semantic_structures": [
+                {
+                    "structure_id": structure.get("structure_id"),
+                    "kind": structure.get("kind"),
+                    "verified_kind": structure.get("verified_kind"),
+                    "field_label": structure.get("field_label") or None,
+                    "member_region_ids": copy.deepcopy(structure.get("member_region_ids") or []),
+                    "bbox": copy.deepcopy(structure.get("bbox")),
+                    "status": structure.get("status"),
+                    "detected_by": copy.deepcopy(structure.get("detected_by") or []),
+                    "relations": [
+                        {
+                            "type": relation["type"],
+                            "key": relation["key"],
+                            "value": relation["value"],
+                            **({"context": relation["context"]} if relation.get("context") else {}),
+                            "bbox": copy.deepcopy(relation["bbox"]),
+                            "key_bbox": copy.deepcopy(relation["key_bbox"]),
+                            "value_bbox": copy.deepcopy(relation["value_bbox"]),
+                            "region_ids": copy.deepcopy(relation["region_ids"]),
+                        }
+                        for relation in (
+                            structure.get("relations") or []
+                            if structure.get("status") == "verified" else []
+                        )
+                    ],
+                }
+                for structure in page.get("semantic_structures") or []
+            ],
         })
 
     return {

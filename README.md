@@ -8,7 +8,7 @@
 
 파이프라인은 문서마다 두 결과를 만듭니다.
 
-- **P1 근거 데이터**: OCR/PDF/VLM이 본 내용, 후보 텍스트, 좌표 출처, 품질 경고를 보존합니다.
+- **P1 근거 데이터**: OCR/PDF/HWP 구조/VLM이 본 내용, 후보 텍스트, 좌표 출처, 품질 경고를 보존합니다.
 - **P3 심의 입력**: 심의 단계에 필요한 최종 영역만 간결하게 전달합니다.
 
 P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은 페이지별
@@ -68,6 +68,7 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
 ```text
 입력 파일
   ↓ 1. 페이지 렌더 및 PDF 텍스트 추출
+       └ HWP/HWPX는 Kordoc 구조 추출 + 한컴 COM PDF 렌더(개발 브랜치)
 페이지 이미지 + 디지털 텍스트 줄
   ↓ 2. 일반 페이지는 통째로, 세로로 긴 페이지는 글자 밀도 경계로 타일 분할
   ↓ 3. spark-1118 PP-StructureV3 호출
@@ -76,9 +77,10 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
   ↓ 5. OCR/PDF 줄을 영역에 한 번만 귀속하고 미배정 줄을 복구 후보로 보존
   ↓ 6. VLM 문서 분류 및 상품 소유권 판정
   ↓ 7. 표 구조 복원
-  ↓ 8. 영역별 VLM 전사와 OCR 대조, 불일치 시 Judge가 최종 텍스트 선택
-  ↓ 9. 상품별 심의 템플릿 결정 및 영역별 복수 구분값 라벨링
-  ↓ 10. 최종 region_id 정규화
+  ↓ 8. HWP 입력이면 좌표 없는 구조 텍스트·셀을 시각 Region에 정렬
+  ↓ 9. 영역별 VLM 전사와 OCR 대조, 불일치 시 Judge가 최종 텍스트 선택
+  ↓ 10. 상품별 심의 템플릿 결정 및 영역별 복수 구분값 라벨링
+  ↓ 11. 최종 region_id 정규화
 P1 근거 데이터 + P3 심의 입력
 ```
 
@@ -86,6 +88,8 @@ P1 근거 데이터 + P3 심의 입력
 좌표는 PaddleX 레이아웃 또는 OCR/PDF 텍스트 줄에서만 만들며 VLM이 좌표를 새로 생성하지 않습니다.
 
 세부 단계와 VLM 호출 위치는 [docs/PIPELINE.md](docs/PIPELINE.md)를 참고하세요.
+처음 저장소를 인수받는 개발자를 위한 전체 입출력·단계별 근거·운영 주의사항은
+[docs/HANDOVER.md](docs/HANDOVER.md)에 정리되어 있습니다.
 
 ## 외부 서비스와 환경변수
 
@@ -110,6 +114,9 @@ cp .env.example .env
 | `PARSER_V2_ASPECT_LIMIT` | 통짜/타일 분할 기준 종횡비 |
 | `PARSER_V2_TILE_SPAN` | 타일 목표 길이(px) |
 | `PARSER_V2_ENCODE` | PaddleX 전송 이미지 형식(`jpeg` 또는 `png`) |
+| `KORDOC_COMMAND`, `KORDOC_VERSION`, `KORDOC_TIMEOUT` | HWP 구조 파서 명령·버전·제한 시간(개발 브랜치) |
+| `HWP_AUTOMATION_SECURITY_MODULE` | 한컴 Automation 보안 승인 DLL 경로(개발 브랜치) |
+| `HWP_RENDER_TIMEOUT`, `HWP_RENDER_DIR` | HWP→PDF 제한 시간과 선택적 중간 PDF 보존 위치 |
 | `NH_OUTPUT_ROOT` | 실행 결과 저장 위치(선택) |
 | `NH_MEDIA_DIR` | 렌더한 페이지 이미지 저장 위치(선택) |
 | `VLM_CACHE`, `VLM_CACHE_DIR` | VLM 응답 캐시 정책과 위치(선택) |
@@ -169,11 +176,11 @@ P3의 `pages[].regions[]`가 심의의 기본 근거입니다.
 | `region_id` | P1 재조회와 화면 하이라이트에 쓰는 `pN_rNNN` ID |
 | `product_id` | 여러 상품이 한 페이지에 있을 때의 상품 소유권 |
 | `bbox` | 렌더된 페이지 픽셀 좌표 `[x1, y1, x2, y2]` |
-| `selected_text` | OCR/PDF와 VLM 판독을 거쳐 선택된 최종 텍스트 |
+| `selected_text` | OCR/PDF/HWP 구조와 VLM 판독을 거쳐 선택된 최종 텍스트 |
 | `labels` | 해당 영역의 템플릿 구분값 목록. 복수 허용 |
 | `kind` | `text` 또는 `table` |
 | `needs_review` | 파싱 품질상 원문 대조가 필요한지 여부 |
-| `text_source` | 최종 텍스트가 `ocr` 계열인지 `vlm`인지 |
+| `text_source` | 최종 텍스트 출처. `hwp`, `digital`, `ocr`, `vlm` 중 하나 |
 | `table` | 표인 경우의 상태와 크기. 검증 완료 표만 반복 키 없는 `rows` 행렬 포함 |
 
 `needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 표 셀 미배치, 낮은 판독
@@ -196,10 +203,15 @@ nh_parser_fin/
   vlm/                    fc87 Gemma 호출과 응답 캐시
 tests/                    외부 서버 없이 실행하는 단위 테스트
 docs/PIPELINE.md           단계별 데이터 흐름과 설계 근거
+docs/HWP_INPUT.md          개발 중 HWP 렌더·구조 결합 경로와 실행 환경
 ```
 
-HWP/HWPX 입력은 사내 `document-processor` 패키지가 추가로 필요합니다. 이 패키지가 없어도
-PDF와 이미지 경로는 동작하며, HWP를 읽을 때만 명시적인 import 오류가 발생합니다.
+HWP/HWPX 입력 로직은 현재 `feat/hwp-input-render` 브랜치에서 구현·검증 중이며 아직
+`main`에 병합되지 않았습니다. 요청 당시 사용한 이름은 `codex/hwp-input-rendering`이므로 ZIP
+생성 전 실제 GitHub 브랜치명을 확인해야 합니다. 이 개발 브랜치에서는 Windows, 설치형 한컴오피스 COM Automation,
+Kordoc 4.14.1이 추가로 필요합니다. Kordoc 구조 파싱과 한컴의 실제 페이지 PDF 렌더를 결합하고,
+기존 PDF/PaddleX 경로에서 bbox를 만듭니다. 이 환경이 없어도 PDF와 이미지 경로는 동작합니다.
+세부 흐름과 제약은 [docs/HWP_INPUT.md](docs/HWP_INPUT.md)를 참고하세요.
 
 ## 검증
 

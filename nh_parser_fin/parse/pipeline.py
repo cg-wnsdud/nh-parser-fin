@@ -26,6 +26,7 @@ from .hwp_alignment import align_hwp_structure
 from .ids import normalize_region_ids
 from .quality import flag
 from .recovery import build_recovery_candidates
+from .relations import analyze_page_relations, document_row_relations
 from .semantic import (
     analyze_page_context,
     analyze_product_labels,
@@ -698,6 +699,7 @@ def run_full_pipeline(
     *,
     out: Path,
     media_dir: Path,
+    compact_output: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """기준 OCR 결과에 fc87 Gemma 의미 판정을 붙이고 P1/P3를 저장한다."""
     vlm_client.reset_stats()
@@ -761,6 +763,19 @@ def run_full_pipeline(
         # VLM/표/텍스트/라벨 판단이 모두 끝난 뒤 외부 ID만 통일한다.
         # 배열 순서를 바꾸지 않으므로 reading_order와 상품 소유권은 그대로다.
         normalize_region_ids(pages)
+        for page in pages:
+            # 페이지 전체 VLM이 찾은 표 구역 안에서 원문 라인의 의미 짝을 판정한다.
+            # Region을 합치지 않으므로 기존 라벨·좌표·심의 참조 ID가 유지된다.
+            if doc["file_type"] in {"hwp", "hwpx"}:
+                # HWP 원본 표의 행/셀 경계가 있으므로 Paddle의 넓은 후보로
+                # 여러 항목을 다시 묶지 않는다.
+                document_row_relations(page)
+                if not page["semantic_structures"]:
+                    # 구조 파서가 셀을 주지 못한 페이지는 PDF/이미지와 같은
+                    # 시각적 후보 검증 경로로 보낸다.
+                    analyze_page_relations(images[int(page["page_no"])], page)
+            else:
+                analyze_page_relations(images[int(page["page_no"])], page)
         doc["review_units"] = review_units(pages, product_templates)
 
         p1 = build_p1(doc)
@@ -773,10 +788,11 @@ def run_full_pipeline(
         _write_json(final_dir / f"{safe}.p1.json", p1)
         _write_json(final_dir / f"{safe}.p3.json", p3)
 
-    _write_stage_views(p1_documents, out)
-    _write_json(out / "05-p1.json", p1_documents)
-    _write_json(out / "06-p3.json", p3_documents)
-    _append_p3_label_studio(tasks, p3_documents, out)
+    if not compact_output:
+        _write_stage_views(p1_documents, out)
+        _write_json(out / "05-p1.json", p1_documents)
+        _write_json(out / "06-p3.json", p3_documents)
+        _append_p3_label_studio(tasks, p3_documents, out)
     totals: dict[str, int] = {}
     for document in p1_documents:
         for page in document.get("pages") or []:
@@ -787,7 +803,8 @@ def run_full_pipeline(
         "by_schema": copy.deepcopy(vlm_client.STATS),
         "region_reading": {"scope": read_scope, **totals},
     }
-    _write_json(out / "vlm-stats.json", stats)
+    if not compact_output:
+        _write_json(out / "vlm-stats.json", stats)
     manifest_path = out / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["semantic_pipeline"] = stats

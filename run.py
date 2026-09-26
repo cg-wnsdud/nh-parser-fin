@@ -48,6 +48,10 @@ def _args() -> argparse.Namespace:
         "--with-vlm", action="store_true",
         help="기존 fc87 Gemma로 소유권·텍스트 Judge·복수 라벨을 판정하고 P1/P3까지 생성",
     )
+    parser.add_argument(
+        "--compact-output", action="store_true",
+        help="파일별 P1/P3·렌더 이미지·HTML 보고서만 저장",
+    )
     return parser.parse_args()
 
 
@@ -202,7 +206,8 @@ def main() -> None:
     profile = _profile(args)
     sources = iter_inputs(list(args.input), list(args.exclude))
     out = OUTPUT_ROOT / args.run_name
-    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    media_dir = out / "images" if args.compact_output else MEDIA_DIR
+    media_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
     documents, tasks = [], []
     all_labels = [
@@ -245,7 +250,8 @@ def main() -> None:
                         fmt=profile.encode,
                     )
                     call_seconds += response["seconds"]
-                    _write_json(out / "raw" / f"{key}_t{piece.index:02d}.json", response["pruned"])
+                    if not args.compact_output:
+                        _write_json(out / "raw" / f"{key}_t{piece.index:02d}.json", response["pruned"])
                     for found, target in (
                         (client.det_boxes(response["pruned"]), det),
                         (client.parsing_boxes(response["pruned"]), visual_parsing),
@@ -283,7 +289,7 @@ def main() -> None:
             )
             # 조각 오프셋까지 적용된 **페이지 좌표** 박스를 남긴다. `replay.py` 가
             # PaddleX 재호출 없이 조립 로직만 다시 돌릴 때 쓰는 입력이다.
-            _write_json(out / "boxes" / f"{key}.json", {
+            boxes_record = {
                 "canvas": list(page.image.size),
                 "page_no": page.page_no,
                 "source_file": page.source_file,
@@ -293,7 +299,9 @@ def main() -> None:
                 "structured_route": page.structured_route,
                 "structured_blocks": page.structured_blocks,
                 "structure_probe": page.structure_probe,
-            })
+            }
+            if not args.compact_output:
+                _write_json(out / "boxes" / f"{key}.json", boxes_record)
             evidence = build_page_evidence(
                 parsing,
                 lines,
@@ -324,10 +332,11 @@ def main() -> None:
             })
             if page.hwp_structure is not None:
                 evidence["hwp_structure"] = page.hwp_structure
-            _write_json(out / "pages" / f"{key}.json", evidence)
+            if not args.compact_output:
+                _write_json(out / "pages" / f"{key}.json", evidence)
 
             media_name = f"parser_v2_{args.run_name}__{key}.png"
-            media_path = MEDIA_DIR / media_name
+            media_path = media_dir / media_name
             if not media_path.exists():
                 page.image.save(media_path, format="PNG", optimize=False)
             for box in parsing:
@@ -402,22 +411,46 @@ def main() -> None:
         "pages": len(tasks),
     }
     _write_json(out / "manifest.json", manifest)
-    _write_json(out / "documents.json", documents)
-    _write_json(out / "label-studio.json", tasks)
-    labeling_config = view.labeling_config(all_labels).replace(
-        "1-det / 2-parsing / 3-ocr / 4-unassigned",
-        "1-raw parsing / 2-text source / 3-unassigned",
-    )
-    (out / "labeling-config.xml").write_text(labeling_config, encoding="utf-8")
+    _write_json(out / "media-index.json", [
+        {
+            "source_file": task["data"]["source_file"],
+            "page_no": task["data"]["page_no"],
+            "image_name": str(task["data"]["image"]).split("pages/", 1)[-1],
+        }
+        for task in tasks
+    ])
+    if not args.compact_output:
+        _write_json(out / "documents.json", documents)
+        _write_json(out / "label-studio.json", tasks)
+        labeling_config = view.labeling_config(all_labels).replace(
+            "1-det / 2-parsing / 3-ocr / 4-unassigned",
+            "1-raw parsing / 2-text source / 3-unassigned",
+        )
+        (out / "labeling-config.xml").write_text(labeling_config, encoding="utf-8")
     if args.with_vlm:
         from nh_parser_fin.parse.pipeline import run_full_pipeline
 
         p1, p3 = run_full_pipeline(
-            documents, tasks, out=out, media_dir=MEDIA_DIR,
+            documents, tasks, out=out, media_dir=media_dir,
+            compact_output=args.compact_output,
         )
         print(f"P1/P3: 문서 {len(p1)}개 / {len(p3)}개")
+        if args.compact_output:
+            from nh_parser_fin.ocr.table_preview import write_table_previews
+            from report import build as build_report
+
+            media_map = {
+                (str(task["data"]["source_file"]), int(task["data"]["page_no"])):
+                media_dir / str(task["data"]["image"]).split("pages/", 1)[-1]
+                for task in tasks
+            }
+            write_table_previews(p1, media_map, out)
+            (out / "report.html").write_text(
+                build_report(out, f"NH 광고물 파싱 — {args.run_name}"), encoding="utf-8",
+            )
     print(f"\n완료: {out}")
-    print(f"Label Studio: {out / 'label-studio.json'}")
+    if not args.compact_output:
+        print(f"Label Studio: {out / 'label-studio.json'}")
 
 
 if __name__ == "__main__":

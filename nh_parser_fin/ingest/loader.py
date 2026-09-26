@@ -99,7 +99,10 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
     docir = None
     docir_attempted = False
     docir_error: str | None = None
-    structured_mode = os.environ.get("STRUCTURED_DOCUMENT_ROUTE", "auto").strip().lower()
+    # PDF에는 HWP와 달리 신뢰할 수 있는 원본 표 셀 객체가 없는 경우가 많다.
+    # 기본은 PDFium 텍스트/좌표 + 시각 파이프라인으로 두고, DocIR 기반 PDF
+    # 구조 추론은 비교 실험을 명시적으로 요청했을 때만 사용한다.
+    structured_mode = os.environ.get("STRUCTURED_DOCUMENT_ROUTE", "off").strip().lower()
     for index, pdf_page in enumerate(pdf):
         width_pt, height_pt = pdf_page.get_size()
         verdict = triage_page(pdf_page)
