@@ -390,9 +390,8 @@ HWP_CARDS = [
      "· Kordoc 폴백은 고정 버전 실행 권장"),
     (520, "HWP-2  로컬 PDF 렌더", "hwp",
      "ingest/hwp_render.py::render_hwp_to_pdf()\n"
-     "· Windows: 한컴 COM → HTML/Chromium\n"
-     "  → LibreOffice 순서\n"
-     "· Linux: HTML/Chromium → LibreOffice\n"
+     "· 모든 OS: HTML/Chromium → LibreOffice\n"
+     "· 설치형 한컴오피스 호출 없음\n"
      "· HTML DOM 행은 구조 bbox 근거로 사용\n"
      "· 모든 변환은 로컬, Hwp SDK 호출 없음\n"
      "· HWP_RENDER_DIR 지정 시 중간 PDF 보존"),
@@ -501,7 +500,7 @@ STAGE_ROW2 = [
      "· 공백 제거 후 일치도 0.95 미만이면 Judge 가\n"
      "  같은 crop 과 두 후보를 보고 정본을 고른다\n"
      "· PDF 디지털/OCR/VLM 후보를 Judge 가 대조\n"
-     "· 한컴 PUA 글리프는 나머지 문맥이 구조와\n"
+     "· HWP PUA 글리프는 나머지 문맥이 구조와\n"
      "  맞을 때만 vlm_structure_verified 로 정규화\n"
      "· 그 뒤 visual_tables.py 가 Paddle/VLM 표\n"
      "  후보를 페이지+확대 이미지로 확인\n"

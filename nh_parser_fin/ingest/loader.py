@@ -154,7 +154,7 @@ def _hwp_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
     """HWP의 실제 페이지를 로컬 PDF로 렌더하고 구조 텍스트를 함께 싣는다.
 
     내장 이미지를 가상 페이지로 만들던 예전 경로는 사용자 화면의 페이지/bbox와 맞지
-    않았다. 이제 원본 HWP 이름은 유지한 채 한컴 PDF의 페이지 캔버스를 사용한다.
+    않았다. 이제 원본 HWP 이름은 유지한 채 로컬 변환 PDF의 페이지 캔버스를 사용한다.
     """
     import pypdfium2 as pdfium
 

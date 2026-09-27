@@ -225,10 +225,10 @@ def parse_hwp_structure(path: Path) -> dict[str, Any]:
 def repartition_by_rendered_text(
     structure: dict[str, Any], rendered_page_texts: list[str],
 ) -> list[dict[str, Any]]:
-    """Kordoc 논리 페이지를 실제 한컴 렌더 페이지에 다시 배치한다.
+    """Kordoc 논리 페이지를 실제 렌더 페이지에 다시 배치한다.
 
     HWP의 자동 쪽나눔은 Kordoc block.pageNumber에 반영되지 않는 경우가 있다. 009는
-    모든 블록이 1쪽이라고 나오지만 한컴 렌더는 심의필 두 줄을 2쪽에 배치한다. PDF
+    모든 블록이 1쪽이라고 나오지만 렌더 결과는 심의필 두 줄을 2쪽에 배치한다. PDF
     텍스트층과의 포함 관계로 문단을 실제 페이지에 옮긴다.
     """
     def norm(value: Any) -> str:

@@ -101,7 +101,7 @@ cp .env.example .env
 | `PARSER_V2_TILE_SPAN` | 타일 목표 길이(px) |
 | `PARSER_V2_ENCODE` | PaddleX 전송 이미지 형식(`jpeg` 또는 `png`) |
 | `KORDOC_COMMAND`, `KORDOC_VERSION`, `KORDOC_TIMEOUT` | HWP 구조 파서 명령·버전·제한 시간(개발 브랜치) |
-| `HWP_AUTOMATION_SECURITY_MODULE` | 한컴 Automation 보안 승인 DLL 경로(개발 브랜치) |
+| `HWP_RENDER_BACKEND` | HWP 렌더 선택: `auto`(HTML→LibreOffice), `html`, `libreoffice` |
 | `HWP_RENDER_TIMEOUT`, `HWP_RENDER_DIR` | HWP→PDF 제한 시간과 선택적 중간 PDF 보존 위치 |
 | `NH_OUTPUT_ROOT` | 실행 결과 저장 위치(선택) |
 | `NH_MEDIA_DIR` | 렌더한 페이지 이미지 저장 위치(선택) |
@@ -193,10 +193,10 @@ docs/HWP_INPUT.md          개발 중 HWP 렌더·구조 결합 경로와 실행
 ```
 
 HWP/HWPX 입력 로직은 현재 `feat/hwp-input-render` 브랜치에서 구현·검증 중이며 아직
-`main`에 병합되지 않았습니다. 요청 당시 사용한 이름은 `codex/hwp-input-rendering`이므로 ZIP
-생성 전 실제 GitHub 브랜치명을 확인해야 합니다. 이 개발 브랜치에서는 Windows, 설치형 한컴오피스 COM Automation,
-Kordoc 4.14.1이 추가로 필요합니다. Kordoc 구조 파싱과 한컴의 실제 페이지 PDF 렌더를 결합하고,
-기존 PDF/PaddleX 경로에서 bbox를 만듭니다. 이 환경이 없어도 PDF와 이미지 경로는 동작합니다.
+`main`에 병합되지 않았습니다. 이 브랜치에서는 document-processor 구조 파싱과
+HTML/Chromium 렌더를 우선 사용하고, 구조 파싱에는 Kordoc, 렌더에는 LibreOffice를
+각각 폴백으로 사용합니다. 렌더 페이지는 기존 PDF/PaddleX 경로로 bbox를 만듭니다.
+설치형 한컴오피스는 호출하지 않습니다. 이 환경이 없어도 PDF와 이미지 경로는 동작합니다.
 세부 흐름과 제약은 [docs/HWP_INPUT.md](docs/HWP_INPUT.md)를 참고하세요.
 
 ## 검증

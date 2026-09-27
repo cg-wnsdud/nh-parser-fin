@@ -137,6 +137,33 @@ def _paddle_preview_html(preview: dict[str, Any] | None) -> str:
     )
 
 
+def _table_checks_html(page: dict[str, Any] | None) -> str:
+    if page is None:
+        return ""
+    checks = page.get("table_checks") or []
+    rows = []
+    for check in checks:
+        source = "Paddle" if check.get("source") == "paddle" else "페이지 VLM"
+        decision = "표 채택" if check.get("accepted") else "표 미채택"
+        ids = ", ".join(str(value) for value in check.get("source_region_ids") or [])
+        reason = str(check.get("reason") or "근거 없음")
+        confidence = check.get("confidence")
+        score = f" · 확신도 {float(confidence):.2f}" if isinstance(confidence, (int, float)) else ""
+        rows.append(
+            "<li>"
+            f"<strong>{html.escape(source)} · {html.escape(decision)}</strong>{html.escape(score)}"
+            f"<div>{html.escape(ids)}</div><div>{html.escape(reason)}</div>"
+            "</li>"
+        )
+    return (
+        "<details class='table-checks'><summary>표 후보 VLM 검증: "
+        f"{sum(bool(check.get('accepted')) for check in checks)}/{len(checks)}개 채택"
+        "</summary><ol>"
+        + ("".join(rows) if rows else "<li>표 검증 후보 없음</li>")
+        + "</ol></details>"
+    )
+
+
 def _boxes_svg(page: dict[str, Any], width: int, height: int) -> str:
     parts = [
         f"<svg viewBox='0 0 {width} {height}' preserveAspectRatio='none' class='overlay'>"
@@ -202,6 +229,19 @@ def build(run: Path, title: str) -> str:
             for path in sorted((run / "final").glob("*.p3.json"))
         ]
     )
+    aggregate_p1 = run / "05-p1.json"
+    p1 = (
+        json.loads(aggregate_p1.read_text(encoding="utf-8"))
+        if aggregate_p1.exists()
+        else [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((run / "final").glob("*.p1.json"))
+        ]
+    )
+    p1_pages = {
+        (str(document["source_file"]), int(page["page_no"])): page
+        for document in p1 for page in document.get("pages") or []
+    }
     media = media_index(run)
     preview_path = run / "paddle-table-index.json"
     previews = {
@@ -232,6 +272,7 @@ def build(run: Path, title: str) -> str:
                 f"<section class='pane' data-key='{key}'>"
                 f"{_summary_html(document, page)}"
                 f"{_paddle_preview_html(previews.get((source_file, page_no)))}"
+                f"{_table_checks_html(p1_pages.get((source_file, page_no)))}"
                 f"<div class='split'>"
                 f"<div class='left'><div class='canvas'>"
                 f"<img src='{uri}' alt='{html.escape(source_file)}'>"
@@ -338,6 +379,11 @@ ol.regions {{ list-style:none; margin:0; padding:0; }}
 .paddle-preview summary {{ cursor:pointer; font-weight:600; }}
 .paddle-preview a {{ margin-right:10px; font-size:12px; }}
 .paddle-preview img {{ display:block; max-width:100%; max-height:70vh; margin-top:8px; }}
+.table-checks {{ background:#fff; border:1px solid var(--line); border-radius:6px;
+  padding:8px 12px; margin:8px 0; }}
+.table-checks summary {{ cursor:pointer; font-weight:600; }}
+.table-checks ol {{ margin:8px 0 0; padding-left:24px; }}
+.table-checks li {{ padding:4px 0; border-top:1px solid var(--line); }}
 .warn {{ color:#B71C1C; font-size:12px; margin-top:4px; }}
 .warn.top {{ padding:8px 16px; background:#FFEBEE; }}
 h3 {{ font-size:12px; color:var(--muted); margin:14px 0 4px; }}

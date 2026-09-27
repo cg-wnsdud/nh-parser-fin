@@ -88,7 +88,7 @@ ID로 P1을 조회합니다.
 flowchart TD
     A[PDF / PNG·JPG] --> B[입력 탐색 및 페이지 이미지 정규화]
     HW[HWP·HWPX] --> H1[document-processor 구조 추출, 실패 시 Kordoc]
-    HW --> H2[로컬 PDF 렌더: 한컴 또는 HTML/Chromium 또는 LibreOffice]
+    HW --> H2[로컬 PDF 렌더: HTML/Chromium 또는 LibreOffice]
     H2 --> B
     B --> C{페이지 종횡비가 한계 초과?}
     C -- 아니오 --> D[페이지 전체를 PaddleX로 전송]
@@ -176,8 +176,8 @@ PaddleX를 대체하는 별도 Region이 아니라 같은 페이지 좌표에 �
 
 1. `ingest/hwp_structure.py`가 document-processor를 우선 사용하고 실패하면 Kordoc으로 문단, 표, 병합 셀, 중첩 표를 읽습니다. 이 결과는
    문자열과 문서 구조는 정확하지만 화면 좌표가 없습니다.
-2. `ingest/hwp_render.py`가 Windows 한컴 COM, document-processor HTML/Chromium,
-   LibreOffice 중 사용 가능한 로컬 백엔드로 원본을 PDF로 저장합니다.
+2. `ingest/hwp_render.py`가 document-processor HTML/Chromium을 우선 사용하고,
+   실패하면 LibreOffice로 원본을 로컬 PDF로 저장합니다.
 3. 변환 PDF는 일반 PDF와 같은 경로로 실제 페이지 이미지, 디지털 텍스트 bbox, triage 결과를
    만듭니다. 따라서 최종 bbox는 사용자가 보는 페이지와 같은 좌표계를 사용합니다.
 4. Kordoc의 논리 `pageNumber`가 자동 쪽 나눔을 반영하지 않는 경우가 있어, 변환 PDF의 페이지별
@@ -457,7 +457,7 @@ Reader 텍스트와 현재 parser 텍스트는 공백을 제거하고 `SequenceM
 | `off` | 영역 Reader/Judge 비활성화 |
 
 HWP 구조와 PDF 텍스트가 이미 같은 문자열을 확인한 Region은 VLM의 단독 오독으로 정본을 바꾸거나
-불필요한 검수 대상으로 만들지 않습니다. 다만 한컴 전용 사설 영역(PUA) 글리프를 PDF/HWP가
+불필요한 검수 대상으로 만들지 않습니다. 다만 HWP 글꼴의 사설 영역(PUA) 글리프를 PDF/HWP가
 표준 문자로 표현하지 못하고 VLM이 화면에서 정상 문자를 읽은 경우에는, 나머지 영숫자 문맥이
 구조와 일치할 때 `vlm_structure_verified`로 제한적으로 정규화할 수 있습니다.
 
@@ -637,8 +637,7 @@ HWP/HWPX 입력은 현재 HWP 개발 브랜치에서 다음 로컬 실행 환경
 필요합니다.
 
 - document-processor 또는 Node.js/npm과 Kordoc 4.14.1 중 하나의 구조 파서.
-- Windows 한컴 COM, HTML/Chromium, LibreOffice 중 하나의 PDF 렌더 백엔드.
-- 한컴 COM을 무인 실행하는 경우 공식 Automation 보안 승인 모듈.
+- HTML/Chromium 또는 LibreOffice 중 하나의 PDF 렌더 백엔드.
 
 이 의존성이 없어도 PDF와 이미지 입력은 실행됩니다. HWP 입력만 구조 파싱 또는 렌더 단계에서
 명시적으로 실패합니다.
@@ -665,7 +664,7 @@ cp .env.example .env
 | `KORDOC_COMMAND` | HWP 선택 | Kordoc 실행 명령, 기본 `npx --yes kordoc@4.14.1` |
 | `KORDOC_VERSION` | HWP 선택 | P1 provenance에 기록할 Kordoc 버전, 기본 `4.14.1` |
 | `KORDOC_TIMEOUT` | HWP 선택 | 구조 파싱 timeout, 기본 180초 |
-| `HWP_AUTOMATION_SECURITY_MODULE` | HWP 운영 권장 | 한컴 Automation 보안 승인 DLL 경로 |
+| `HWP_RENDER_BACKEND` | HWP 선택 | `auto`는 HTML/Chromium → LibreOffice; `html` 또는 `libreoffice` 고정 가능 |
 | `HWP_RENDER_TIMEOUT` | HWP 선택 | HWP→PDF 변환 timeout, 기본 300초 |
 | `HWP_RENDER_DIR` | HWP 선택 | 변환 PDF 보존 디렉터리. 없으면 임시 디렉터리 사용 |
 | `NH_OUTPUT_ROOT` | 선택 | 실행 결과 루트, 기본 `./outputs` |
@@ -796,7 +795,7 @@ nh_parser_fin/
 │  ├─ loader.py                현재 입력 탐색과 페이지 이미지 생성
 │  ├─ canvas.py                RGB 변환, PDF 렌더, native DPI 계산
 │  ├─ triage.py                PDF 판정, 디지털 텍스트·스타일·좌표 추출
-│  ├─ hwp_render.py            한컴 COM 기반 HWP/HWPX→로컬 PDF 렌더
+│  ├─ hwp_render.py            HTML/Chromium·LibreOffice 기반 HWP/HWPX→로컬 PDF 렌더
 │  ├─ hwp_structure.py         Kordoc 구조 정규화와 실제 렌더 페이지 재분배
 │  ├─ assets.py                이전 HWP 내장 이미지 보조 코드, 현재 주 경로 비연결
 │  ├─ hwp.py                   이전 document-processor 구조 파서, 현재 run.py 비연결
@@ -915,7 +914,7 @@ uv run pytest -q
 5. `vlm-stats.json`의 timeout과 비정상 재시도 증가 여부
 6. P1/P3 같은 `region_id`의 bbox와 텍스트 일치
 7. HTML 또는 Label Studio에서 실제 위치 하이라이트
-8. HWP 검증 시 한컴 렌더 페이지 수와 `origin.structure_page_count` 차이 확인
+8. HWP 검증 시 선택된 렌더 페이지 수와 `origin.structure_page_count` 차이 확인
 9. HWP P1의 `hwp_structure`, `hwp_alignment`, Region별 구조 검증 근거 확인
 10. 배경 이미지 문구 회수와 조판용 표가 P3 데이터 표로 잘못 승격되지 않았는지 확인
 
@@ -974,7 +973,7 @@ uv run pytest -q
    개발 A/B에는 캐시를 사용하고 운영에서는 캐시를 끄는 것이 기본 정책입니다.
 3. **HWP 경로는 개발 중**: 현재 `feat/hwp-input-render`에 있으며 아직 `main`에 병합되지
    않았습니다. 요청 시 전달된 `codex/hwp-input-rendering`과 현재 브랜치명의 차이는 ZIP 생성 전
-   확인해야 합니다. Windows·설치형 한컴오피스·Kordoc이 필요하고 Kordoc 구조에는 bbox가 없어 렌더
+   확인해야 합니다. 구조 파서(document-processor 또는 Kordoc)와 로컬 렌더러(HTML/Chromium 또는 LibreOffice)가 필요합니다. Kordoc 구조에는 bbox가 없어 렌더
    Region과 문자열 기반으로 정렬합니다. 구조 파싱 또는 PDF 렌더 실패 시 예전 내장 이미지
    경로로 폴백하지 않습니다.
 4. **누락 문구의 좌표 부재**: VLM이 `missing_visible_text`를 찾더라도 신뢰할 bbox가 없으면 P1의
@@ -1012,7 +1011,7 @@ GitHub의 저장소 ZIP에는 Git에 추적된 파일만 포함됩니다. 현재
 - 개인정보·내부정보를 제거한 대표 입력 1~2건
 - 그 입력으로 생성한 `manifest.json`, 문서별 P1/P3, `vlm-stats.json`, `report.html`
 - PaddleX 서버 YAML 또는 해당 설정을 관리하는 담당자·저장소 위치
-- HWP를 함께 전달한다면 Windows/한컴오피스/Kordoc 설치 방법, Automation 보안 승인 모듈 경로
+- HWP를 함께 전달한다면 document-processor/Kordoc과 Chromium/LibreOffice 설치 방법
 - HWP 기능을 포함할 경우 현재 `feat/hwp-input-render`이 `main`에 병합됐는지 또는 ZIP 대상이
   실제 HWP 개발 브랜치인지 확인한 기록
 

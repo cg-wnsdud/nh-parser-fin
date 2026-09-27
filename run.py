@@ -94,6 +94,14 @@ def _novel_visual_blocks(
     kept: list[dict] = []
     discarded = 0
     for block in visual:
+        # Paddle의 표 HTML은 OCR 텍스트와 태그가 섞인 별도 추정 결과다. HWP DOM이
+        # 이미 원본 표 행을 제공할 때 이를 한 행의 새 본문으로 붙이면 중복·태그가
+        # P3까지 유출된다. 시각 요소 보완에는 순수 텍스트 블록만 사용한다.
+        if "<table" in str(block.get("content") or "").casefold() and any(
+            item.get("kind") == "table" and item.get("table") for item in structured
+        ):
+            discarded += 1
+            continue
         bbox = block.get("bbox") or []
         text = normalize(block.get("content"))
         duplicate = False

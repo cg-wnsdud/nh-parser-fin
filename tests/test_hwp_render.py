@@ -3,21 +3,17 @@ import pytest
 from nh_parser_fin.ingest.hwp_render import backend_order
 
 
-def test_linux_prefers_reconstructed_html_before_libreoffice():
-    assert backend_order("auto", platform="posix") == [
+def test_auto_uses_local_html_then_libreoffice():
+    assert backend_order("auto") == [
         "document_processor_html", "libreoffice",
     ]
 
 
-def test_windows_keeps_hancom_as_highest_fidelity_renderer():
-    assert backend_order("auto", platform="nt") == [
-        "hancom", "document_processor_html", "libreoffice",
-    ]
-
-
 def test_explicit_backend_does_not_silently_change_renderer():
-    assert backend_order("html", platform="posix") == ["document_processor_html"]
-    assert backend_order("libreoffice", platform="nt") == ["libreoffice"]
+    assert backend_order("html") == ["document_processor_html"]
+    assert backend_order("libreoffice") == ["libreoffice"]
+    with pytest.raises(RuntimeError, match="지원하지 않는 HWP_RENDER_BACKEND"):
+        backend_order("hancom")
     with pytest.raises(RuntimeError):
-        backend_order("unknown", platform="posix")
+        backend_order("unknown")
 

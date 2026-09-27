@@ -148,3 +148,21 @@ def test_hybrid_attaches_novel_visual_note_inside_structured_table_row():
     assert free == []
     assert structured[0]["content"].endswith("※ 지정계좌에서 자동이체 처리")
     assert structured[0]["table"]["notes"] == ["※ 지정계좌에서 자동이체 처리"]
+
+
+def test_hybrid_discards_paddle_table_html_when_dom_rows_exist():
+    structured = [
+        {"bbox": [100, 100, 900, 200], "kind": "table", "content": "대출대상\n공무원",
+         "table": {"source": "document_processor"}},
+        {"bbox": [100, 200, 900, 300], "kind": "table", "content": "대출금리\n연 4.45%",
+         "table": {"source": "document_processor"}},
+    ]
+    paddle = [{"bbox": [100, 100, 900, 300], "label": "table",
+               "content": "<html><body><table><tr><td>공무원</td></tr>"
+                          "<tr><td>연 4.45%</td></tr></table></body></html>"}]
+
+    novel, discarded = _novel_visual_blocks(paddle, structured)
+
+    assert novel == []
+    assert discarded == 1
+    assert all("<html>" not in row["content"] for row in structured)
