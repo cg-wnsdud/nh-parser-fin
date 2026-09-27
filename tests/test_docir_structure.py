@@ -1,11 +1,8 @@
 from types import SimpleNamespace
 
-from PIL import Image
-
-from nh_parser_fin.ingest.docir_structure import hwp_structure_from_docir, pdf_page_structure
+from nh_parser_fin.ingest.docir_structure import hwp_structure_from_docir
 from nh_parser_fin.ingest.hwp_html import dom_rows_to_blocks, inject_review_surface_api
-from nh_parser_fin.parse.adapters import build_page_evidence
-from nh_parser_fin.parse.pipeline import _place_tables, _prepare_page
+from nh_parser_fin.parse.pipeline import _prepare_page
 
 
 class RunIR:
@@ -71,56 +68,6 @@ def _fixture_docir():
     )
 
 
-def test_pdf_docir_builds_exact_row_regions_in_canvas_coordinates():
-    result = pdf_page_structure(
-        _fixture_docir(),
-        page_no=1,
-        canvas=(1000, 2000),
-        digital_lines=[
-            {"text": "샘플 대출"},
-            {"text": "대출기간 2년"},
-            {"text": "상환방법 만기일시상환"},
-        ],
-    )
-
-    assert result.route == "structured_fast"
-    assert result.metrics["table_rows"] == 2
-    assert [block["content"] for block in result.blocks] == [
-        "샘플 대출",
-        "대출기간 | 2년",
-        "상환방법 | 만기일시상환",
-    ]
-    assert result.blocks[0]["bbox"] == [100, 100, 900, 300]
-    assert result.blocks[1]["bbox"] == [100, 500, 900, 700]
-    assert result.blocks[1]["table"]["cells"][0]["is_header"] is True
-    assert result.blocks[1]["bbox_source"] == "document_processor_pdf_cells"
-
-
-def test_structured_table_survives_evidence_and_skips_vlm_cell_reconstruction():
-    structured = pdf_page_structure(
-        _fixture_docir(), page_no=1, canvas=(1000, 2000), digital_lines=[]
-    )
-    page = build_page_evidence(
-        structured.blocks,
-        [],
-        page_no=1,
-        canvas=[1000, 2000],
-        digital_lines=[],
-    )
-    prepared = _prepare_page(page)
-    row = next(region for region in prepared["regions"] if region.get("kind") == "table")
-
-    assert row["origin"] == "document_processor"
-    assert row["bbox_source"] == "document_processor_pdf_cells"
-    assert row["text_source"] == "document_processor"
-
-    _place_tables(prepared, Image.new("RGB", (1000, 2000), "white"))
-
-    assert row["table_status"] == "complete"
-    assert row["table"]["source"] == "document_processor"
-    assert row["table"]["cells"][1]["text"] == "2년"
-
-
 def test_prepare_page_suppresses_page_sized_ocr_copy_of_structured_rows():
     regions = []
     rows = [
@@ -155,15 +102,6 @@ def test_prepare_page_suppresses_page_sized_ocr_copy_of_structured_rows():
     assert prepared["unassigned_lines"] == []
     assert len(prepared["raw_unassigned_lines"]) == 1
     assert len(prepared["structure_duplicate_lines"]) == 1
-
-
-def test_scan_like_docir_page_stays_on_visual_route():
-    docir = _fixture_docir()
-    docir.pages[0].parse_status = "skipped"
-
-    result = pdf_page_structure(docir, page_no=1, canvas=(1000, 2000))
-
-    assert result.route == "visual"
 
 
 def test_hwp_docir_preserves_rows_cells_and_full_text_without_bbox():

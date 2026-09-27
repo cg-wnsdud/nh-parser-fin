@@ -208,7 +208,7 @@ card(
     2440, 40, 1000, 200,
     "설계 원칙 — 좌표와 의미의 책임 분리",
     "· bbox 는 PaddleX 레이아웃 또는 OCR/PDF 줄에서만 만든다.\n"
-    "· VLM 은 좌표를 만들지 않는다. 주어진 ID 를 고르고 의미(상품 소유권 · 표 셀 위치 ·\n"
+    "· VLM 은 좌표를 만들지 않는다. 주어진 ID 를 고르고 의미(상품 소유권 · 표 여부 ·\n"
     "  구분값)만 판정한다.\n"
     "· VLM 이 화면에서 봤지만 좌표가 없는 누락 문구는 P1 의 coarse_missing_candidates\n"
     "  에만 남고 P3 Region 으로 승격하지 않는다.\n"
@@ -218,7 +218,7 @@ card(
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 1행 — 입력에서 Region 조립까지 (--with-vlm 없이 실행되는 범위)
+# 1행 — 입력에서 Region 조립까지
 # ──────────────────────────────────────────────────────────────────────────
 STAGE_ROW1 = [
     ("① 광고 파일 입력", "data",
@@ -276,7 +276,7 @@ for i, (t, s, b) in enumerate(STAGE_ROW1):
 # 1행 산출물
 card(
     2740, R1_Y, CW, 420,
-    "산출물 — ①~⑦ (--with-vlm 없이)",
+    "중간 산출물 — ①~⑦",
     "outputs/<run-name>/\n"
     "  manifest.json    실행 프로필 · 시간\n"
     "  documents.json   Region 조립 전체\n"
@@ -380,38 +380,35 @@ text(80, HWP_Y + 14,
      size=16, color="#e8590c")
 
 HWP_CARDS = [
-    (100, "HWP-1  Kordoc 구조 파싱", "hwp",
+    (100, "HWP-1  문서 구조 파싱", "hwp",
      "ingest/hwp_structure.py\n"
      "  ::parse_hwp_structure()\n"
-     "· npx kordoc@4.14.1 (KORDOC_COMMAND)\n"
+     "· document-processor 우선, Kordoc 폴백\n"
      "· 문단 · 표 · 병합 셀 · 중첩 표를 추출\n"
      "· 문자열과 문서 순서는 정확하지만\n"
      "  화면 좌표가 전혀 없다\n"
-     "· KORDOC_VERSION 은 P1 provenance 에 기록\n"
-     "· 운영에서는 고정 버전 실행 경로 지정 권장\n"
-     "  (기본 npx 는 최초 1회 네트워크 사용)"),
-    (520, "HWP-2  한컴 COM 으로 PDF 렌더", "hwp",
+     "· Kordoc 폴백은 고정 버전 실행 권장"),
+    (520, "HWP-2  로컬 PDF 렌더", "hwp",
      "ingest/hwp_render.py::render_hwp_to_pdf()\n"
-     "· PowerShell → HWPFrame.HwpObject\n"
-     "  Open → SaveAs(PDF)\n"
-     "· 설치형 한컴오피스를 현재 세션에서 제어.\n"
-     "  한컴 서버 / Hwp SDK 호출은 없고\n"
-     "  문서 데이터는 로컬에 남는다\n"
-     "· HWP_AUTOMATION_SECURITY_MODULE 로\n"
-     "  파일 접근 확인창 제거\n"
+     "· Windows: 한컴 COM → HTML/Chromium\n"
+     "  → LibreOffice 순서\n"
+     "· Linux: HTML/Chromium → LibreOffice\n"
+     "· HTML DOM 행은 구조 bbox 근거로 사용\n"
+     "· 모든 변환은 로컬, Hwp SDK 호출 없음\n"
      "· HWP_RENDER_DIR 지정 시 중간 PDF 보존"),
     (940, "HWP-3  실제 렌더 페이지로 재분배", "hwp",
      "hwp_structure.repartition_by_rendered_text()\n"
-     "· Kordoc 의 논리 pageNumber 는 자동\n"
+     "· 구조 파서의 논리 pageNumber 는 자동\n"
      "  쪽나눔을 반영하지 못한다\n"
      "· 변환 PDF 의 페이지별 텍스트층과 대조해\n"
      "  구조 노드를 실제 쪽으로 다시 분배\n"
-     "· 009 실측: Kordoc 이 전부 1쪽이라 했지만\n"
+     "· 009 실측: 구조가 전부 1쪽이라 했지만\n"
      "  심의필 · 수신거부 문단을 2쪽으로 이동\n"
      "· 결과는 page.hwp_structure 로 동행"),
-    (1360, "HWP-4  이후는 일반 PDF 와 동일", "data",
+    (1360, "HWP-4  화면 Region 생성", "data",
      "· 변환 PDF → 페이지 이미지 · 디지털 bbox\n"
-     "  · triage → ③ 이후 경로를 그대로 탄다\n"
+     "  · triage. HTML 행 충분 → structured_fast\n"
+     "  또는 hybrid, 나머지는 Paddle 시각 경로\n"
      "· 최종 bbox 는 사용자가 보는 페이지 좌표계\n"
      "· 구조 텍스트는 HWP-5 에서 시각 Region 과 정렬\n\n"
      "역할 분담\n"
@@ -428,17 +425,14 @@ for hx in (520, 940, 1360):
 card(
     1780, HWP_Y + 60, 380, 230,
     "HWP 실패 정책 · 남은 제약",
-    "· Kordoc 파싱 또는 한컴 렌더가 실패하면\n"
-    "  그 입력을 중단한다 (SystemExit).\n"
+    "· 구조 파서 전체 또는 렌더러 전체가\n"
+    "  실패하면 그 입력을 중단한다.\n"
     "  예전 내장 이미지 경로로 폴백하지 않는다.\n"
-    "· ingest/hwp.py · ingest/assets.py 는\n"
-    "  현재 run.py 에 연결돼 있지 않다.\n"
+    "· 예전 ingest/hwp.py · assets.py 는 제거.\n"
     "· boxes/*.json 에 구조 원본이 없어\n"
     "  replay.py 만으로 HWP-5 까지 재현할 수 없다.\n"
-    "· Windows + 설치형 한컴오피스 의존.\n"
-    "  PDF·이미지 입력은 이 의존성과 무관하다.\n"
-    "· 운영에서 Hwp SDK 로 가더라도\n"
-    "  HWP→PDF 어댑터만 교체하면 된다.",
+    "· Spark/Linux에서는 Chromium 또는\n"
+    "  LibreOffice가 설치되어야 한다.",
     style="warn",
 )
 
@@ -454,7 +448,7 @@ text(1130, 462, "변환 PDF 페이지 = 이후 일반 PDF 와 같은 경로", si
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 2행 — VLM 의미 판정과 계약 생성 (--with-vlm)
+# 2행 — VLM 의미 판정과 계약 생성
 # ──────────────────────────────────────────────────────────────────────────
 STAGE_ROW2 = [
     ("⑧ VLM 문서 분류", "vlm",
@@ -480,21 +474,15 @@ STAGE_ROW2 = [
      "  않는다. decorative 는 vlm_excluded 표시만\n"
      "· 확신도 0.7 미만 또는 unknown → needs_review\n\n"
      "실패 → 실행 중단"),
-    ("⑩ 표 승격 · 셀 배치", "vlm",
-     "parse/tables.py · pipeline._place_tables()\n"
-     "· VLM 이 준 member ID 가 가리키는 기존 bbox\n"
-     "  로 병합한다 (모델 좌표를 쓰지 않는다)\n"
-     "· 최소 3셀, anchor 는 기존 구성원 ID.\n"
-     "  merged_from 과 lines 를 보존\n"
-     "· field_list · 소유권이 갈리는 묶음은 병합 안 함\n"
-     "· 전체 이미지 + 표 crop + line_ref 를 주고\n"
-     "  기존 줄을 row/col 에 '배치만' 시킨다\n"
-     "· complete: 미배치 0 · conf 0.7↑ · 밀도 0.3↑\n"
-     "  아니면 partial (원문 줄 텍스트를 유지)\n\n"
-     "실패 → 실행 중단"),
+    ("⑩ HWP 원본 셀 보존", "hwp",
+     "parse/pipeline.py::_place_tables()\n"
+     "· document-processor/HTML 이 제공한 원본 셀만\n"
+     "  P1 의 table 에 보존한다\n"
+     "· PDF 는 PDFium 텍스트와 Paddle 시각 경로\n"
+     "· 시각적 셀 행렬은 추정하지 않는다"),
     ("HWP-5  HWP 구조 정렬", "hwp",
      "parse/hwp_alignment.py::align_hwp_structure()\n"
-     "HWP 페이지에서만 · 표 배치(⑩) 뒤, Reader(⑪) 앞\n"
+     "HWP 페이지에서만 · 원본 셀 보존(⑩) 뒤, Reader(⑪) 앞\n"
      "· 좌표 없는 Kordoc 노드 ↔ bbox 있는 Region\n"
      "  정규화 문자열 · 문서 순서 · 포함 관계로 대조\n"
      "· 앞뒤 문단이 같은 Region 이면 순서로 보완\n"
@@ -504,18 +492,20 @@ STAGE_ROW2 = [
      "· 17x7 조판표 · 1열 이미지 표 → layout_container\n"
      "  (P3 표로 승격하지 않는다)\n"
      "· 하나도 안 맞으면 hwp_structure_page_unmatched"),
-    ("⑪ Region Reader · Judge", "vlm",
+    ("⑪ Region Reader · 표 검증", "vlm",
      "parse/reading.py\n"
-     "· 표를 뺀 Region 을 crop 으로 독립 전사한다\n"
+     "· Region 을 crop 으로 독립 전사한다\n"
      "  (Reader 에게 OCR 텍스트를 보여주지 않는다)\n"
      "· crop: 12px 여백 + 이웃을 흰색 마스킹 +\n"
      "  짧은 변 320px 까지 최대 4배 확대\n"
      "· 공백 제거 후 일치도 0.95 미만이면 Judge 가\n"
      "  같은 crop 과 두 후보를 보고 정본을 고른다\n"
-     "· 디지털 PDF 텍스트 Region 은 정본을 보존하고\n"
-     "  불일치 경고만 남긴다\n"
+     "· PDF 디지털/OCR/VLM 후보를 Judge 가 대조\n"
      "· 한컴 PUA 글리프는 나머지 문맥이 구조와\n"
      "  맞을 때만 vlm_structure_verified 로 정규화\n"
+     "· 그 뒤 visual_tables.py 가 Paddle/VLM 표\n"
+     "  후보를 페이지+확대 이미지로 확인\n"
+     "· 기존 ID 만 병합, P3 kind=table/평문\n"
      "· PARSER_V2_READING_SCOPE  all / targeted / off"),
     ("⑫ 상품별 심의 템플릿", "vlm",
      "parse/templates.py · review/resolution.py\n"
@@ -549,21 +539,21 @@ STAGE_ROW2 = [
      "  대상 Region 바로 뒤로 옮긴다\n"
      "· 모든 판단이 끝난 뒤 pN_r001 부터 재부여\n"
      "· parent_id / child_ids / related_region_id /\n"
-     "  표 member ID 참조도 함께 갱신\n"
+     "  채택된 표 Region ID 도 함께 갱신\n"
      "· 원래 ID 는 source_region_id 와\n"
      "  페이지의 region_id_map 에 남는다"),
     ("⑮ P1 / P3 내보내기", "code",
      "parse/export.py\n"
-     "P1  nh-ad-parse-evidence-v3\n"
+     "P1  nh-ad-parse-evidence-v4\n"
      "  재현 · 원인 분석용 근거 원장\n\n"
-     "P3  nh-ad-region-review-input-v7\n"
+     "P3  nh-ad-region-review-input-v9\n"
      "  region_id · product_id · bbox ·\n"
      "  selected_text · labels · kind ·\n"
      "  needs_review · text_source\n\n"
      "· text_source 는 hwp / digital / ocr / vlm\n"
      "  네 값으로 축약한다\n"
-     "· complete 표만 rows 행렬을 싣고\n"
-     "  partial 은 status 와 shape 만"),
+     "· 표는 kind=table + selected_text 평문\n"
+     "· 원본 셀과 검증 근거는 P1 에만"),
 ]
 HWP_STEP = 3   # HWP-5 는 HWP 페이지에서만 도는 조건부 단계 — 들고 나는 화살표를 구분한다.
 for i, (t, s, b) in enumerate(STAGE_ROW2):
@@ -578,7 +568,7 @@ for i, (t, s, b) in enumerate(STAGE_ROW2):
 # ⑦ → ⑧ 줄바꿈 연결
 arrow([(r1x[6] + 20, R1_Y + R1_H), (r1x[6] + 20, 490), (2320, 490),
        (2320, 1210), (230, 1210), (230, R2_Y - 6)], color="#1971c2")
-text(1180, 1180, "--with-vlm 이면 여기서부터 계속된다. 없으면 ⑦ 에서 끝난다.",
+text(1180, 1180, "기본 실행에서 이 단계가 이어지고 P1/P3를 생성한다.",
      size=13, color="#1971c2")
 
 
@@ -595,8 +585,8 @@ card(
     "  PaddleX 호출        재시도 래퍼 없음 → 실행 중단\n"
     "  ⑧ 문서 분류         파일명 prior 로 폴백하고 계속\n"
     "  ⑨ 페이지 소유권     실행 중단\n"
-    "  ⑩ 표 셀 배치        실행 중단\n"
-    "  ⑪ Reader / Judge    해당 Region 에 경고만 남기고 계속\n"
+    "  ⑩ HWP 원본 셀      구조에 있을 때만 보존\n"
+    "  ⑪ Reader / 표 검증 실패 해당 Region 에 경고만 남기고 계속\n"
     "  ⑫ 템플릿 선택       unresolved 로 남기고 계속\n"
     "  ⑬ 상품별 라벨링     실행 중단\n\n"
     "재실행 정책을 만들 때는 vlm-stats.json · 마지막 산출물 · 캐시 사용 여부를 함께 본다.",
@@ -608,8 +598,8 @@ card(
     "needs_review 는 위반이 아니라 파싱 품질 신호",
     "ownership_unknown / ownership_low_confidence\n"
     "recovery_action_uncertain / recovery_low_confidence\n"
-    "table_unplaced_lines / table_low_confidence /\n"
-    "table_sparse_grid\n"
+    "table_verification_failed / table_region_overlap /\n"
+    "table_reading_order_uncertain\n"
     "digital_text_vlm_disagreement\n"
     "ocr_vlm_disagreement / vlm_judge_low_confidence\n"
     "vlm_only_text / vlm_read_failed\n"
@@ -665,13 +655,13 @@ card(
     "P1 — 근거 원장",
     "outputs/<run>/05-p1.json\n"
     "outputs/<run>/final/<문서>.p1.json\n"
-    "계약 nh-ad-parse-evidence-v3\n\n"
+    "계약 nh-ad-parse-evidence-v4\n\n"
     "· OCR / PDF 원문 줄과 좌표\n"
     "· HWP 구조 근거 (좌표 없음)\n"
     "· PaddleX 영역 관측과 내부 출처\n"
     "· VLM 소유권 · 판독 · 라벨 판정\n"
     "· 선택 전 텍스트 후보와 선택 이유\n"
-    "· 표 셀 배치와 미배치 줄\n"
+    "· HWP 원본 셀 및 시각 표 검증 근거\n"
     "· needs_review 의 구체적 사유\n"
     "· source_region_id · region_id_map",
     style="out",
@@ -682,10 +672,10 @@ card(
     "P3 — 심의 입력",
     "outputs/<run>/06-p3.json\n"
     "outputs/<run>/final/<문서>.p3.json\n"
-    "계약 nh-ad-region-review-input-v7\n\n"
+    "계약 nh-ad-region-review-input-v9\n\n"
     "{ region_id, product_id, bbox, selected_text,\n"
     "  labels, kind, needs_review, text_source }\n"
-    "표는 complete 일 때만 shape · header_rows · rows.\n"
+    "검증된 표는 kind=table · selected_text 평문.\n"
     "읽기 순서와 역색인은 싣지 않는다. 근거 참조는\n"
     "순번이 아니라 region_id 를 쓴다.\n\n"
     "후속 심의 결과 계약은 별도다.\n"

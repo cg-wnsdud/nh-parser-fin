@@ -96,13 +96,8 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
 
     pages: list[LabPage] = []
     pdf = pdfium.PdfDocument(str(path))
-    docir = None
-    docir_attempted = False
-    docir_error: str | None = None
-    # PDF에는 HWP와 달리 신뢰할 수 있는 원본 표 셀 객체가 없는 경우가 많다.
-    # 기본은 PDFium 텍스트/좌표 + 시각 파이프라인으로 두고, DocIR 기반 PDF
-    # 구조 추론은 비교 실험을 명시적으로 요청했을 때만 사용한다.
-    structured_mode = os.environ.get("STRUCTURED_DOCUMENT_ROUTE", "off").strip().lower()
+    # PDF는 PDFium 텍스트/좌표와 시각 파이프라인만 사용한다. HWP의 DocIR
+    # 구조 추출과 달리 PDF 표 셀은 추론 결과이므로 운영 분기로 채택하지 않는다.
     for index, pdf_page in enumerate(pdf):
         width_pt, height_pt = pdf_page.get_size()
         verdict = triage_page(pdf_page)
@@ -129,51 +124,15 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                 for line in extract_digital_lines(pdf_page, dpi_used / 72.0)
             ]
 
-        structured_blocks: list[dict] = []
-        structured_route = "visual"
-        structure_probe: dict = {}
-        if structured_mode not in {"off", "false", "0"} and verdict.verdict == "structured":
-            if not docir_attempted:
-                docir_attempted = True
-                try:
-                    from .docir_structure import load_docir
-
-                    docir = load_docir(path)
-                except Exception as exc:
-                    docir_error = f"{type(exc).__name__}: {exc}"
-            if docir is not None:
-                try:
-                    from .docir_structure import pdf_page_structure
-
-                    structured = pdf_page_structure(
-                        docir,
-                        page_no=index + 1,
-                        canvas=canvas.image.size,
-                        digital_lines=digital_lines,
-                    )
-                    structured_blocks = structured.blocks
-                    structured_route = structured.route
-                    structure_probe = structured.metrics
-                except Exception as exc:
-                    structured_route = "visual"
-                    structure_probe = {
-                        "parser": "document_processor",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-            elif docir_error:
-                structure_probe = {
-                    "parser": "document_processor",
-                    "error": docir_error,
-                }
         pages.append(LabPage(
             doc_id=path.stem,
             source_file=path.name,
             page_no=index + 1,
             image=canvas.image,
             digital_lines=digital_lines,
-            structured_blocks=structured_blocks,
-            structured_route=structured_route,
-            structure_probe=structure_probe,
+            structured_blocks=[],
+            structured_route="visual",
+            structure_probe={},
             origin={
                 "kind": "pdf",
                 "page_pt": [round(width_pt, 1), round(height_pt, 1)],
@@ -184,8 +143,8 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                 "dpi_asis": round(dpi_asis, 1),
                 "dpi_used": dpi_used,
                 "sent_px": list(canvas.image.size),
-                "processing_route": structured_route,
-                "structure_probe": structure_probe,
+                "processing_route": "visual",
+                "structure_probe": {},
             },
         ))
     return pages

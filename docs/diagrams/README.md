@@ -31,10 +31,10 @@ uv run python docs/diagrams/make_pipeline_excalidraw.py
 
 ## 그림이 담고 있는 것
 
-- ①~⑦ — `--with-vlm` 없이 도는 범위. 입력 정규화부터 Region 조립과 복구 후보까지.
-- HWP-1 ~ HWP-5 — `feat/hwp-input-render` 에서 추가한 HWP/HWPX 경로. Kordoc 구조 파싱,
-  한컴 COM PDF 렌더, 실제 렌더 페이지 재분배, 그리고 표 배치 뒤에 도는 구조 정렬.
-- ⑧~⑮ — `--with-vlm` 일 때 이어지는 VLM 의미 판정과 P1/P3 계약 생성.
+- ①~⑦ — 입력 정규화부터 Region 조립과 복구 후보까지의 기본 단계.
+- HWP-1 ~ HWP-5 — `feat/hwp-input-render` 에서 추가한 HWP/HWPX 경로. 원본 구조 파싱,
+  사용 가능한 렌더 백엔드로 PDF 페이지 생성, 실제 렌더 페이지 재분배와 구조 정렬.
+- ⑧~⑮ — 항상 이어지는 VLM 의미 판정과 P1/P3 계약 생성.
 - 하단 — 단계별 실패 정책, `needs_review` 사유 코드, VLM 호출량, 산출물 파일.
 
 내용의 근거는 [HANDOVER.md](../HANDOVER.md) · [PIPELINE.md](../PIPELINE.md) ·

@@ -28,47 +28,33 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
 }
 ```
 
-표는 `kind: "table"`로 구분합니다. P1에는 셀 좌표와 근거(`table.grid`, `table.cells`,
-`table.notes`)를 보관합니다. P3와 리포트에는 검증을 통과한 표만 `shape`, `header_rows`,
-`rows` 행렬로 표시합니다. 셀 배치가 불완전한 표는 `status: "partial"`과 크기만 전달하며,
-화면에서는 빈 격자 대신 경고와 `selected_text` 원문을 보여 줍니다. 심의 결과가 `region_ids`를
-돌려주면 화면에서 P3의 `bbox`를 사용해 해당 위치를 표시할 수 있습니다.
+표는 PDF·이미지의 Paddle `table` 영역과 페이지 VLM이 찾은 누락 후보를 이미지로
+재검증합니다. 한 심의 항목에 속하는 표로 확인된 경우에만 기존 Region의 `kind`를
+`table`로 설정합니다. 여러 Region으로 나뉜 표는 원본 문구와 bbox를 보존하면서 한
+Region으로 묶습니다. 실제 셀을 추정하거나 의미 관계를 새로 만들지 않습니다.
+HWP 원본/HTML에서 확인된 셀은 P1의 `table.cells`에 남습니다. 후보·거부 사유는
+P1의 `table_checks`에 남고, P3는 짧은 평문과 bbox만 전달합니다.
 
-예를 들어 2행 2열 금리 표는 P3에서 다음처럼 나옵니다. 리포트는 `header_rows`의 0번 행을
-헤더로 그려 `구분 | 금리` / `기본 | 3.0%` 격자로 보여 줍니다.
+예를 들어 시각적으로 검증된 금리 표는 P3에서 다음처럼 나옵니다.
 
 ```json
 {
   "region_id": "p1_r020",
   "bbox": [243, 518, 1570, 708],
-  "selected_text": "구분\n금리\n기본\n3.0%",
+  "selected_text": "구분 | 금리\n기본 | 3.0%",
   "kind": "table",
-  "table": {
-    "status": "complete",
-    "shape": [2, 2],
-    "header_rows": [0],
-    "rows": [["구분", "금리"], ["기본", "3.0%"]]
-  }
+  "labels": ["금리"]
 }
 ```
 
-| 구분 | 금리 |
-|---|---|
-| 기본 | 3.0% |
-
-반대로 셀을 모두 검증하지 못했으면 P3에는 아래처럼 행렬을 넣지 않습니다. 리포트도 표 대신
-`표 구조 미검증 (partial, 2×2)` 안내와 `selected_text`를 표시합니다.
-
-```json
-"table": {"status": "partial", "shape": [2, 2]}
-```
+심의 결과가 `region_ids`를 돌려주면 P3의 `bbox`로 해당 위치를 표시할 수 있습니다.
 
 ## 전체 처리 흐름
 
 ```text
 입력 파일
   ↓ 1. 페이지 렌더 및 PDF 텍스트 추출
-       └ HWP/HWPX는 Kordoc 구조 추출 + 한컴 COM PDF 렌더(개발 브랜치)
+       └ HWP/HWPX는 document-processor 우선/Kordoc 폴백 구조 추출 + 로컬 PDF 렌더
 페이지 이미지 + 디지털 텍스트 줄
   ↓ 2. 일반 페이지는 통째로, 세로로 긴 페이지는 글자 밀도 경계로 타일 분할
   ↓ 3. spark-1118 PP-StructureV3 호출
@@ -76,9 +62,9 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
   ↓ 4. 타일 좌표를 페이지 좌표로 복원하고 경계 중복 제거
   ↓ 5. OCR/PDF 줄을 영역에 한 번만 귀속하고 미배정 줄을 복구 후보로 보존
   ↓ 6. VLM 문서 분류 및 상품 소유권 판정
-  ↓ 7. 표 구조 복원
-  ↓ 8. HWP 입력이면 좌표 없는 구조 텍스트·셀을 시각 Region에 정렬
-  ↓ 9. 영역별 VLM 전사와 OCR 대조, 불일치 시 Judge가 최종 텍스트 선택
+  ↓ 7. HWP 원본/HTML 셀 보존 및 구조 텍스트를 시각 Region에 정렬
+  ↓ 8. 영역별 VLM 전사와 OCR 대조, 불일치 시 Judge가 최종 텍스트 선택
+  ↓ 9. Paddle·페이지 VLM 표 후보의 이미지 검증 및 Region 병합
   ↓ 10. 상품별 심의 템플릿 결정 및 영역별 복수 구분값 라벨링
   ↓ 11. 최종 region_id 정규화
 P1 근거 데이터 + P3 심의 입력
@@ -142,16 +128,16 @@ python -m pip install -e .
 python -m pip install pytest
 ```
 
-PaddleX까지만 실행해 영역 조립을 확인하려면:
+전체 파이프라인을 실행하려면(페이지 조립 뒤 VLM 판정과 P1/P3 생성까지 항상 수행):
 
 ```bash
-uv run python run.py --run-name ocr-check --input "samples/sample.pdf"
+uv run python run.py --run-name full-check --input "samples/sample.pdf"
 ```
 
-VLM 후처리와 P1/P3까지 실행하려면:
+PaddleX를 재호출하지 않고 저장된 박스로 Region 조립만 다시 확인하려면:
 
 ```bash
-uv run python run.py --run-name full-check --with-vlm --input "samples/sample.pdf"
+uv run python replay.py --from full-check --run-name replay-check
 ```
 
 `--input`에는 파일 또는 폴더를 여러 개 줄 수 있습니다. 기본 `--sizing asis`는 이미지의
@@ -183,7 +169,7 @@ P3의 `pages[].regions[]`가 심의의 기본 근거입니다.
 | `text_source` | 최종 텍스트 출처. `hwp`, `digital`, `ocr`, `vlm` 중 하나 |
 | `table` | 표인 경우의 상태와 크기. 검증 완료 표만 반복 키 없는 `rows` 행렬 포함 |
 
-`needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 표 셀 미배치, 낮은 판독
+`needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 낮은 판독
 확신도 같은 **파싱 품질 신호**입니다. 구체적인 사유는 같은 `region_id`의 P1
 `review_reasons`에서 확인합니다. 실제 심의 결과는 `위반`, `판정불가`, `충족`과 그 근거
 `region_ids`를 별도로 반환합니다.

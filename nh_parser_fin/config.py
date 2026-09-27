@@ -170,9 +170,6 @@ class Settings:
     paddlex_use_region_detection: str | bool = os.environ.get(
         "PADDLEX_USE_REGION_DETECTION", "server"
     )
-    paddlex_use_table_recognition: str | bool = os.environ.get(
-        "PADDLEX_USE_TABLE_RECOGNITION", "server"
-    )
     # OCR 검출 3개. 영역만의 축이 아니다 — 줄이 늘고 줄면 Region 조립(미배정 줄 흡수)이
     # 따라 움직여 경계가 바뀐다. 영역 수만 보고 판단하면 안 된다.
     paddlex_text_det_thresh: str | float = os.environ.get(

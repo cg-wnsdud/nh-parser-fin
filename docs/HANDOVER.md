@@ -34,7 +34,7 @@
 3. PaddleX 레이아웃 영역과 OCR/PDF 텍스트 줄 조립
 4. 어느 영역에도 들어가지 않은 텍스트 복구
 5. 문서 분류와 상품별 영역 소유권 판정
-6. 표 후보 병합과 셀 행·열 복원
+6. HWP 원본 셀 보존과 시각 표 후보 검증
 7. HWP 입력의 구조 텍스트·셀을 시각 Region과 정렬
 8. OCR/PDF/HWP 구조 텍스트와 VLM 전사의 교차 검증
 9. 상품별 광고 템플릿 선택과 구분값 라벨링
@@ -65,7 +65,7 @@ Region은 문장 하나와 반드시 일치하지 않습니다. 한 시각 영�
 | 구분 | 역할 | 포함 내용 |
 |---|---|---|
 | P1 | 감사·재현·원인 분석용 근거 원장 | OCR/PDF/HWP 구조/VLM 후보, 좌표 출처, 소유권 판정, 표 셀, 경고 사유, 원래 ID |
-| P3 | 후속 광고 심의 단계의 간결한 입력 | 최종 ID, 상품, bbox, 최종 텍스트, 구분값, 표 요약, 검수 여부 |
+| P3 | 후속 광고 심의 단계의 간결한 입력 | 최종 ID, 상품, bbox, 최종 텍스트, 구분값, 표 여부, 검수 여부 |
 
 P1과 P3의 같은 영역은 최종 `region_id`로 연결됩니다. P3만 보고 상세 판정 근거가 부족하면 같은
 ID로 P1을 조회합니다.
@@ -87,8 +87,8 @@ ID로 P1을 조회합니다.
 ```mermaid
 flowchart TD
     A[PDF / PNG·JPG] --> B[입력 탐색 및 페이지 이미지 정규화]
-    HW[HWP·HWPX] --> H1[Kordoc 구조 텍스트 추출]
-    HW --> H2[한컴 COM으로 로컬 PDF 렌더]
+    HW[HWP·HWPX] --> H1[document-processor 구조 추출, 실패 시 Kordoc]
+    HW --> H2[로컬 PDF 렌더: 한컴 또는 HTML/Chromium 또는 LibreOffice]
     H2 --> B
     B --> C{페이지 종횡비가 한계 초과?}
     C -- 아니오 --> D[페이지 전체를 PaddleX로 전송]
@@ -103,20 +103,21 @@ flowchart TD
     J --> K[미배정 줄 복구 후보 생성]
     K --> L[VLM 문서 분류]
     L --> M[VLM 상품 소유권·복구 후보·표 영역 판정]
-    M --> N[표 Region 병합 및 셀 배치]
+    M --> N[구조 표 확인]
     H1 --> HA[HWP 구조를 실제 PDF 페이지별로 재분배]
     N --> HB[HWP 구조와 시각 Region 정렬]
     HA --> HB
     HB --> O[Region Reader와 Judge 텍스트 검증]
-    O --> P[상품별 심의 템플릿 선택]
+    O --> V[Paddle·페이지 VLM 표 후보 이미지 검증]
+    V --> P[상품별 심의 템플릿 선택]
     P --> Q[상품별 복수 구분값 라벨링]
     Q --> R[최종 region_id 정규화]
     R --> S[P1 근거 데이터]
     R --> T[P3 심의 입력]
 ```
 
-실제 진입점은 `run.py`입니다. `--with-vlm`이 없으면 위 흐름 중 Region 조립까지 수행하고,
-`--with-vlm`을 주면 문서 분류부터 P1/P3 생성까지 이어집니다.
+실제 진입점은 `run.py`입니다. Region 조립 뒤에 VLM 문서 분류부터 P1/P3 생성까지
+항상 이어집니다. 저장된 박스로 Region 조립만 다시 실행할 때는 `replay.py`를 사용합니다.
 
 ## 4. 입력 계약
 
@@ -126,7 +127,7 @@ flowchart TD
 |---|---|
 | PDF | 모든 페이지를 이미지로 렌더하고, 사용 가능한 디지털 텍스트 줄도 별도 추출 |
 | PNG/JPG/JPEG | 파일 하나를 페이지 하나의 RGB 이미지로 처리 |
-| HWP/HWPX | **개발 브랜치:** Kordoc으로 구조를 읽고, 설치형 한컴오피스로 실제 페이지를 PDF 렌더한 뒤 기존 PDF·PaddleX 경로와 결합 |
+| HWP/HWPX | **개발 브랜치:** document-processor 우선/Kordoc 폴백으로 구조를 읽고, 사용 가능한 로컬 백엔드로 PDF를 렌더한 뒤 구조 또는 Paddle 시각 경로와 결합 |
 
 `--input`에는 파일과 폴더를 여러 개 지정할 수 있습니다. 폴더를 지정하면 **그 폴더 바로 아래의
 지원 파일만** 읽으며 하위 폴더를 재귀 탐색하지 않습니다. `--exclude`는 파일명에 특정 문자열이
@@ -135,7 +136,6 @@ flowchart TD
 ```bash
 uv run python run.py \
   --run-name handover-smoke \
-  --with-vlm \
   --input "samples/sample.pdf" "samples/images" \
   --exclude "old"
 ```
@@ -164,7 +164,8 @@ uv run python run.py \
 - `structured`와 `hybrid` 페이지의 디지털 텍스트 줄 추출 여부
 - 페이지 생성 근거인 `origin.triage` 기록
 
-중요하게도 triage 결과와 무관하게 **모든 페이지는 PaddleX를 거칩니다.** 디지털 텍스트는
+PDF·이미지는 triage 결과와 무관하게 **모든 페이지가 PaddleX를 거칩니다.** HWP의
+`structured_fast` 페이지는 충분한 HTML 구조 행이 있어 PaddleX를 생략합니다. 디지털 텍스트는
 PaddleX를 대체하는 별도 Region이 아니라 같은 페이지 좌표에 놓인 더 정확한 텍스트 후보입니다.
 
 ### 4.4 HWP/HWPX 처리 범위
@@ -173,15 +174,16 @@ PaddleX를 대체하는 별도 Region이 아니라 같은 페이지 좌표에 �
 내장 이미지 자산 하나를 가상 페이지 하나로 취급하지 않습니다. 현재
 `ingest/loader.py::_hwp_pages()`는 서로 다른 두 근거를 만든 뒤 결합합니다.
 
-1. `ingest/hwp_structure.py`가 Kordoc으로 문단, 표, 병합 셀, 중첩 표를 읽습니다. 이 결과는
+1. `ingest/hwp_structure.py`가 document-processor를 우선 사용하고 실패하면 Kordoc으로 문단, 표, 병합 셀, 중첩 표를 읽습니다. 이 결과는
    문자열과 문서 구조는 정확하지만 화면 좌표가 없습니다.
-2. `ingest/hwp_render.py`가 Windows에 설치된 한컴오피스의 `HWPFrame.HwpObject` COM
-   Automation으로 원본을 로컬 PDF로 저장합니다.
+2. `ingest/hwp_render.py`가 Windows 한컴 COM, document-processor HTML/Chromium,
+   LibreOffice 중 사용 가능한 로컬 백엔드로 원본을 PDF로 저장합니다.
 3. 변환 PDF는 일반 PDF와 같은 경로로 실제 페이지 이미지, 디지털 텍스트 bbox, triage 결과를
    만듭니다. 따라서 최종 bbox는 사용자가 보는 페이지와 같은 좌표계를 사용합니다.
 4. Kordoc의 논리 `pageNumber`가 자동 쪽 나눔을 반영하지 않는 경우가 있어, 변환 PDF의 페이지별
    텍스트와 대조해 구조 노드를 실제 렌더 페이지에 다시 분배합니다.
-5. 이후 PaddleX가 화면 Region과 이미지에만 있는 문구를 찾습니다. 표 배치 후 HWP 구조를
+5. `hybrid`/`visual`에서는 PaddleX가 화면 Region과 이미지에만 있는 문구를 찾습니다.
+   `structured_fast`에서는 HTML DOM 행을 그대로 씁니다. 그 뒤 HWP 구조를
    Region에 정렬하고, 내용이 충분히 일치할 때만 HWP 문자열을 정본 후보로 채택합니다.
 
 즉, **HWP 구조는 텍스트·셀 순서 근거**, **변환 PDF와 PaddleX는 페이지·bbox·시각 전용 문구
@@ -189,8 +191,8 @@ PaddleX를 대체하는 별도 Region이 아니라 같은 페이지 좌표에 �
 Region으로 회수할 수 있습니다. 구조 셀 하나가 여러 Region에 걸치면 한 Region의 텍스트를
 억지로 덮어쓰지 않고 검증 근거로만 사용합니다.
 
-현재 HWP 입력은 Kordoc 구조 파싱과 한컴 PDF 변환이 모두 성공해야 진행합니다. 둘 중 하나가
-실패하면 HWP 문서 처리를 명시적으로 중단하며, 예전 내장 이미지 경로로 자동 폴백하지 않습니다.
+현재 HWP 입력은 구조 파서 하나와 렌더 백엔드 하나가 성공해야 진행합니다. 모두 실패하면
+HWP 처리를 중단하며, 예전 내장 이미지 경로로 자동 폴백하지 않습니다.
 상세 환경과 실측 내용은 [`docs/HWP_INPUT.md`](HWP_INPUT.md)를 참고하십시오.
 
 ## 5. 단계별 상세 로직
@@ -329,7 +331,7 @@ PaddleX가 텍스트는 읽었지만 그 텍스트를 담는 레이아웃 Region
 
 관련 코드: `vlm/client.py::classify()`
 
-`--with-vlm` 실행 시 문서 첫 페이지 이미지로 다음을 문서당 한 번 판정합니다.
+기본 실행에서 문서 첫 페이지 이미지로 다음을 문서당 한 번 판정합니다.
 
 - `product_group`: 예금성, 대출성, 카드, 투자성 등
 - `ad_type`: 상세페이지, 안내장, 배너, 이벤트페이지 등
@@ -376,56 +378,29 @@ P1에는 단순 결괏값뿐 아니라 `category_source`를 남겨 파일명과 
 소유권/복구 판정 호출은 공통 VLM 재시도 후에도 실패하면 현재 상위 파이프라인에서 복구하지 않아
 실행이 중단됩니다.
 
-### 5.10 표 후보 승격과 셀 배치
+### 5.10 표 후보 검증과 출력
 
-관련 코드: `parse/tables.py`, `parse/pipeline.py::_place_tables()`
+관련 코드: `parse/pipeline.py::_place_tables()`, `parse/visual_tables.py`
 
-표 후보는 다음 신호 중 하나로 찾습니다.
+`document-processor`가 제공한 표 셀은 원본 문서 구조와 좌표를 근거로 `table`에 보존합니다.
+HWP 구조와 시각 Region의 내용이 일치하면 HWP 원본 셀도 뒤의 정렬 단계에서 연결합니다.
+셀 근거는 P1에만 두며 P3에는 표의 `kind`와 최종 평문을 전달합니다.
 
-- 기존 Region이 이미 `kind=table`
-- PaddleX 레이아웃 label이 `table`
-- OCR 줄이 여러 행·열 격자 형태로 정렬됨
-- 페이지 소유권 VLM이 여러 Region/Candidate ID를 하나의 `table_areas`로 지정
-
-VLM이 지정한 `table_areas`를 병합할 때는 모델 좌표가 아니라 member ID가 가리키는 기존
-OCR/PDF bbox를 사용합니다. 최소 3개 셀이 있어야 승격하며 같은 행에 인접한 누락 셀을 기하학으로
-보충합니다.
-
-다음 경우에는 병합하지 않습니다.
-
-- VLM이 `field_list`로 판정한 항목명-값 나열
-- 구성 Region의 상품 소유권이 둘 이상으로 갈리는 경우
-- 표를 구성하기에 ID가 너무 적은 경우
-
-병합 시 새 임시 표 ID를 만들지 않고 기존 구성원 중 PaddleX table Region 또는 가장 앞선 Region을
-anchor로 사용합니다. 원래 구성원과 줄은 `merged_from`과 `lines`에 보존합니다.
-
-실제 행·열 배치는 VLM에 페이지 전체 이미지, 표 확대 crop, 모든 `line_ref`와 crop 기준 좌표를
-함께 줘서 받습니다. VLM은 텍스트나 bbox를 새로 만들지 않고 기존 줄을 row/col에 배치하는 역할만
-합니다. 반환 결과는 다시 검증해 다음을 보존합니다.
-
-- `grid.rows`, `grid.cols`
-- 셀별 row, col, 원문, bbox, `line_refs`, header 여부
-- 표 아래의 각주 `notes`
-- 배치하지 못했거나 잘못 배치한 `unplaced_line_refs`
-- VLM confidence와 분석 근거
-
-표가 `complete`가 되려면 다음을 모두 만족해야 합니다.
-
-1. 미배치 줄이 없음
-2. confidence 0.7 이상
-3. 채워진 셀 밀도 0.3 이상
-
-하나라도 실패하면 `partial`이며 원문 줄 조립 텍스트를 최종 텍스트로 유지하고 품질 경고를
-남깁니다. P3에는 `complete` 표만 실제 `rows` 행렬을 싣고, `partial` 표는 상태와 크기만
-전달합니다.
+PDF·이미지에서 PaddleX가 `table`로 표시했거나 페이지 VLM이 `table_areas`로 지정한
+구역은 아직 표 **후보**입니다. 영역별 텍스트 판독 뒤 페이지 이미지와 후보 확대 이미지를
+VLM에 보내 실제 표인지 확인하고, 한 심의 항목에 속한 기존 Region ID만 선택하게 합니다.
+채택된 구성원이 여러 개면 원문 문구를 읽기 순서대로 이은 한 Region으로 병합하고 bbox는
+구성원 bbox의 합집합을 씁니다. 서로 다른 상품을 합치거나 중복 컨테이너를 표로 승격하지
+않습니다. OCR 줄을 셀 격자나 임의의 의미 관계로 추정 배치하지 않습니다. 채택·거부 사유는
+P1의 `table_checks`에, 원본 구성원은 채택 Region의 `table_detection.source_regions`에
+보존합니다. P3에서는 `kind=table`, `selected_text`, `bbox`만 봅니다.
 
 ### 5.11 HWP 구조와 시각 Region 정렬
 
 관련 코드: `ingest/hwp_structure.py`, `parse/hwp_alignment.py`,
 `parse/pipeline.py::run_full_pipeline()`
 
-이 단계는 HWP/HWPX 페이지에만 실행되며, 상품 소유권과 VLM 표 배치를 마친 뒤 Region Reader보다
+이 단계는 HWP/HWPX 페이지에만 실행되며, 상품 소유권과 구조 표 확인 뒤 Region Reader보다
 먼저 실행됩니다. 좌표 없는 Kordoc 노드와 bbox가 있는 시각 Region의 정규화 문자열, 순서,
 포함 관계를 대조합니다.
 
@@ -471,7 +446,7 @@ Reader 텍스트와 현재 parser 텍스트는 공백을 제거하고 `SequenceM
 - **Reader가 빈 문자열을 반환**: 기존 OCR 텍스트를 지우지 않습니다.
 - **Reader 호출 실패**: 해당 Region만 `vlm_read_failed`로 표시하고 페이지 처리는 계속합니다.
 
-표 Region은 셀 배치 단계에서 이미 VLM이 crop을 봤으므로 Reader 대상에서 제외합니다.
+표 Region은 셀 구조를 평문 전사로 덮어쓰지 않도록 Reader 대상에서 제외합니다.
 
 `PARSER_V2_READING_SCOPE`로 범위를 바꿀 수 있습니다.
 
@@ -557,15 +532,15 @@ p2_r001, p2_r002, ...
 ```
 
 이때 bbox, 텍스트, 라벨, 배열 순서는 바꾸지 않습니다. `related_region_id`, `parent_id`,
-`child_ids`, 표 member ID와 VLM 결정 내부 참조도 함께 갱신합니다. 원래 ID는 P1의
+`child_ids`, 채택된 표 Region ID와 VLM 결정 내부 참조도 함께 갱신합니다. 원래 ID는 P1의
 `source_region_id`와 페이지의 `region_id_map`에 남습니다.
 
 ### 5.16 P1/P3 내보내기
 
 관련 코드: `parse/export.py`
 
-P1 계약 버전은 `nh-ad-parse-evidence-v3`, P3 계약 버전은
-`nh-ad-region-review-input-v7`입니다.
+P1 계약 버전은 `nh-ad-parse-evidence-v4`, P3 계약 버전은
+`nh-ad-region-review-input-v9`입니다.
 
 P3 Region의 기본 형태는 다음과 같습니다.
 
@@ -595,7 +570,7 @@ P3의 `text_source`는 세부 구현 이름을 그대로 노출하지 않고 `hw
 
 ## 6. 실행 산출물 구조
 
-### 6.1 VLM 없이 실행한 경우
+### 6.1 전체 실행의 입력·PaddleX 중간 산출물
 
 ```text
 outputs/<run-name>/
@@ -614,7 +589,7 @@ outputs/<run-name>/
 렌더된 페이지 PNG는 기본적으로 저장소 루트의 `.media/`에 별도 저장됩니다. 여러 실행이 같은
 페이지 이미지를 참조할 수 있도록 실행 디렉터리와 분리되어 있습니다.
 
-### 6.2 `--with-vlm`으로 실행한 경우
+### 6.2 전체 실행에서 추가로 생성하는 파일
 
 위 파일에 다음이 추가되거나 확장됩니다.
 
@@ -661,10 +636,9 @@ python -m pip install pytest
 HWP/HWPX 입력은 현재 HWP 개발 브랜치에서 다음 로컬 실행 환경이 추가로
 필요합니다.
 
-- Windows와 설치형 한컴오피스(`HWPFrame.HwpObject` COM Automation 사용 가능 상태)
-- Node.js/npm과 Kordoc 4.14.1. 기본 명령은 `npx --yes kordoc@4.14.1`이며 운영에서는 네트워크에
-  의존하지 않는 고정 설치 경로를 권장합니다.
-- 무인 실행이나 파일 접근 경고를 처리하기 위한 한컴 공식 Automation 보안 승인 모듈
+- document-processor 또는 Node.js/npm과 Kordoc 4.14.1 중 하나의 구조 파서.
+- Windows 한컴 COM, HTML/Chromium, LibreOffice 중 하나의 PDF 렌더 백엔드.
+- 한컴 COM을 무인 실행하는 경우 공식 Automation 보안 승인 모듈.
 
 이 의존성이 없어도 PDF와 이미지 입력은 실행됩니다. HWP 입력만 구조 파싱 또는 렌더 단계에서
 명시적으로 실패합니다.
@@ -712,7 +686,7 @@ PaddleX가 원격 서버의 loopback 포트에만 열려 있으면 로컬 터널
 ssh -N -L 18081:127.0.0.1:8081 spark-1118
 ```
 
-### 7.3 OCR/Region 조립까지만 실행
+### 7.3 전체 파이프라인 실행
 
 ```bash
 uv run python run.py \
@@ -720,12 +694,12 @@ uv run python run.py \
   --input "samples/sample.pdf"
 ```
 
-### 7.4 전체 VLM 파이프라인 실행
+### 7.4 간결한 산출물로 전체 파이프라인 실행
 
 ```bash
 uv run python run.py \
   --run-name full-check \
-  --with-vlm \
+  --compact-output \
   --input "samples/sample.pdf"
 ```
 
@@ -796,7 +770,7 @@ VLM 호출 수는 고정되어 있지 않습니다. 대략 다음의 합입니�
 |---|---|
 | 문서 분류 | 파일명 prior로 폴백하고 계속 |
 | 페이지 소유권 | 현재 실행 중단 |
-| 표 셀 배치 | 현재 실행 중단 |
+| 표 의미 관계 검증 | 후보 상태와 오류를 P1에 남기고 계속 |
 | Region Reader/Judge | 해당 Region에 경고를 남기고 계속 |
 | 템플릿 선택 | `unresolved`로 남기고 계속 |
 | 상품별 라벨링 | 현재 실행 중단 |
@@ -837,7 +811,7 @@ nh_parser_fin/
 │  ├─ adapters.py              레이아웃+OCR/PDF 줄을 canonical Region으로 조립
 │  ├─ recovery.py              미배정 줄 복구 후보 생성
 │  ├─ semantic.py              상품 소유권과 상품별 복수 라벨 VLM 판정
-│  ├─ tables.py                표 후보, Region 병합, VLM 셀 배치와 검증
+│  ├─ tables.py                이전 표 격자 추정 구현(현재 실행 경로에서는 사용하지 않음)
 │  ├─ hwp_alignment.py         좌표 없는 HWP 구조와 시각 Region 정렬
 │  ├─ reading.py               Region Reader/Judge와 최종 텍스트 선택
 │  ├─ templates.py             상품별 템플릿·허용 라벨·review unit 구성
@@ -862,14 +836,14 @@ tests/                         외부 서버 없이 실행하는 핵심 계약 �
 저장소에는 이전 실험과 공유 모델을 위한 코드도 남아 있습니다. 인수인계 시 “파일이 있으니 현재
 실행된다”고 오해하지 않도록 구분해야 합니다.
 
-- `ingest/hwp.py::ingest_hwp()`와 `ingest/assets.py`의 예전 `document-processor` 경로는 현재
-  `run.py`가 호출하지 않습니다. 개발 브랜치의 실제 HWP 경로는 `ingest/hwp_structure.py`와
-  `ingest/hwp_render.py`입니다.
+- 예전 자산 추출용 `ingest/hwp.py`, `ingest/assets.py`는 제거했습니다. 실제 HWP 경로는
+  `ingest/hwp_structure.py`와 `ingest/hwp_render.py`입니다.
 - `ocr/reading_order.py::make_tiles()` 대신 현재는 `ocr/tiling.py::plan()`을 사용합니다.
-- `ocr/paddlex.py::build_payload()`의 많은 선택 옵션 대신 현재 `Profile.request_payload`의
-  `{"fileType": 1}`만 사용합니다.
-- `parse/tables.py::table_candidates()`는 현재 주 경로에서 직접 호출되지 않습니다. 미배정 줄은
-  먼저 일반 복구 후보가 되고 VLM의 `table_areas` ID 판정을 통해 표로 승격됩니다.
+- Paddle 요청은 `Profile.request_payload`의 `{"fileType": 1}`만 사용합니다. 표 인식
+  모듈의 on/off는 클라이언트 환경변수가 아니라 Paddle 서버 YAML이 결정합니다.
+- PDF에 대한 `document-processor` 구조 추론과 독립 `table_audit.py` 실행기는 정리했습니다.
+  PDF는 PDFium 텍스트/좌표와 Paddle 시각 경로를 사용하고, HWP의 `document-processor`
+  구조 경로는 유지합니다.
 - `ir.py` 모델 전체가 최종 `run.py` 데이터 흐름을 강제하는 것은 아닙니다. 현재 주요 파이프라인은
   dict 기반 조립이며, `Line` 등 일부 타입은 PDF 추출과 보조 경로에서 사용됩니다.
 
@@ -886,9 +860,9 @@ P3의 `needs_review=true`는 광고 내용이 위반이라는 뜻이 아닙니�
 | `ownership_unknown` | 상품 또는 페이지 공통 소속을 확정하지 못함 |
 | `recovery_action_uncertain` | 복구 후보 처리 action이 `needs_review` |
 | `recovery_low_confidence` | 복구 후보 판정 confidence가 0.7 미만 |
-| `table_unplaced_lines` | 일부 원문 줄을 표 셀에 배치하지 못함 |
-| `table_low_confidence` | 표 구조 confidence가 0.7 미만 |
-| `table_sparse_grid` | 선언된 격자 대비 채워진 셀 비율이 낮음 |
+| `table_verification_failed` | 표 후보의 이미지 VLM 검증 호출 실패 |
+| `table_region_overlap` | 표 후보 박스가 다른 Region 본문과 중복되어 표 확정 보류 |
+| `table_reading_order_uncertain` | 여러 줄 Region을 묶어 읽기 순서가 불확실함 |
 | `digital_text_vlm_disagreement` | PDF 원문과 VLM 판독이 다르며 PDF 원문을 보존함 |
 | `ocr_vlm_disagreement` | OCR과 Reader가 다르고 확정 Judge가 없음 |
 | `vlm_judge_low_confidence` | Judge 최종 선택 confidence가 0.7 미만 |

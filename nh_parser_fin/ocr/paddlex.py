@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
 """PaddleX `/layout-parsing` 호출 — 한 장 보내고 응답을 그대로 받는다.
 
-`SETTINGS` 를 읽지 않는다. 보내는 값은 전부
-인자로 들어오고 그대로 기록된다. "이 실행이 무엇을 보냈는지"를 기억이나 환경변수에
-의존해 추적하지 않기 위해서다.
-
-**`"server"` 규약**: 값이 `"server"` 면 그 키를 **안 보낸다**. 그래야 서버
-`PP-StructureV3.yml` 의 값이 쓰인다. 스칼라를 하나라도 보내면 그 항목의 **클래스별
-dict 가 통째로 무력화**되므로, 클래스별 설정을 시험할 때는 반드시 `server` 여야 한다.
+`SETTINGS` 를 읽지 않는다. 실제 요청 본문은 실행 프로필이 넘긴 값을 그대로 사용한다.
+표 검출·인식 모듈의 활성화는 현재 서버 YAML 설정에 따른다.
 """
 from __future__ import annotations
 
@@ -17,77 +12,6 @@ import time
 
 import requests
 from PIL import Image
-
-SENTINEL = ("", "server", "none", None)
-
-# 광고물 파싱에서 늘 끄는 것들. 값을 바꾸고 싶으면 CLI 로 덮어쓴다.
-FIXED = {
-    "fileType": 1,
-    "useDocOrientationClassify": False,
-    "useDocUnwarping": False,
-    "useFormulaRecognition": False,
-    "useTextlineOrientation": False,
-}
-
-NUMERIC_KEYS = {
-    "layout_threshold": "layoutThreshold",
-    "layout_unclip_ratio": "layoutUnclipRatio",
-    "text_det_limit_side_len": "textDetLimitSideLen",
-    "text_det_thresh": "textDetThresh",
-    "text_det_box_thresh": "textDetBoxThresh",
-    "text_det_unclip_ratio": "textDetUnclipRatio",
-    "text_rec_score_thresh": "textRecScoreThresh",
-}
-BOOL_KEYS = {
-    "layout_nms": "layoutNms",
-    "use_region_detection": "useRegionDetection",
-    "use_table_recognition": "useTableRecognition",
-}
-STRING_KEYS = {
-    "layout_merge_bboxes_mode": "layoutMergeBboxesMode",
-    "text_det_limit_type": "textDetLimitType",
-}
-INT_KEYS = {"textDetLimitSideLen"}
-
-
-def _number(value):
-    text = str(value).strip()
-    try:
-        return float(text)
-    except ValueError as exc:
-        raise ValueError(f"숫자 또는 'server' 여야 합니다: {value!r}") from exc
-
-
-def _boolean(value):
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "on"):
-        return True
-    if text in ("0", "false", "no", "off"):
-        return False
-    raise ValueError(f"true/false 또는 'server' 여야 합니다: {value!r}")
-
-
-def build_payload(**knobs) -> dict:
-    """보낼 본문을 만든다(파일 바이트 제외). 지정하지 않은 항목은 서버 값을 쓴다."""
-    payload = dict(FIXED)
-    for name, key in NUMERIC_KEYS.items():
-        raw = knobs.get(name)
-        if raw in SENTINEL:
-            continue
-        value = _number(raw)
-        payload[key] = int(value) if key in INT_KEYS else value
-    for name, key in BOOL_KEYS.items():
-        raw = knobs.get(name)
-        if raw in SENTINEL:
-            continue
-        payload[key] = _boolean(raw)
-    for name, key in STRING_KEYS.items():
-        raw = knobs.get(name)
-        if raw in SENTINEL:
-            continue
-        payload[key] = str(raw).strip()
-    return payload
-
 
 def encode(image: Image.Image, fmt: str = "jpeg", quality: int = 90) -> bytes:
     buffer = io.BytesIO()

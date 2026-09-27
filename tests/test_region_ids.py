@@ -26,7 +26,6 @@ def test_final_ids_are_uniform_without_changing_region_order_or_references():
                 "label_decision": {"region_id": "p1_x003", "labels": ["유의사항"]},
             },
         ],
-        "table_areas": [{"member_ids": ["p1_r004", "p1_x003"]}],
     }]
     original_boxes = [region["bbox"] for region in pages[0]["regions"]]
 
@@ -41,7 +40,6 @@ def test_final_ids_are_uniform_without_changing_region_order_or_references():
     assert regions[1]["parent_id"] == "p1_r001"
     assert regions[1]["related_region_id"] == "p1_r001"
     assert regions[1]["label_decision"]["region_id"] == "p1_r002"
-    assert pages[0]["table_areas"][0]["member_ids"] == ["p1_r001", "p1_r002"]
 
 
 def test_review_units_and_p3_use_the_same_normalized_ids():

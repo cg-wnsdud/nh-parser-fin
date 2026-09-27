@@ -1,9 +1,9 @@
 """NH 광고물 파싱 실행기.
 
 입력 렌더 → 종횡비 기반 통짜/타일 → PaddleX(서버 YAML 그대로) → 본문 우선 Region.
-``--with-vlm`` 이면 VLM 의미 판정(소유권·표·판독·템플릿·구분값)과 P1/P3 까지 잇는다.
+VLM 의미 판정(소유권·표·판독·템플릿·구분값)과 P1/P3 생성까지 항상 수행한다.
 
-    python run.py --run-name <이름> --with-vlm --input "<파일 또는 폴더>"
+    python run.py --run-name <이름> --input "<파일 또는 폴더>"
 """
 from __future__ import annotations
 
@@ -44,10 +44,6 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--tile-span", type=int, default=None)
     parser.add_argument("--sizing", choices=("asis", "maxside"), default="asis")
     parser.add_argument("--max-side", type=int, default=2500)
-    parser.add_argument(
-        "--with-vlm", action="store_true",
-        help="기존 fc87 Gemma로 소유권·텍스트 Judge·복수 라벨을 판정하고 P1/P3까지 생성",
-    )
     parser.add_argument(
         "--compact-output", action="store_true",
         help="파일별 P1/P3·렌더 이미지·HTML 보고서만 저장",
@@ -427,27 +423,26 @@ def main() -> None:
             "1-raw parsing / 2-text source / 3-unassigned",
         )
         (out / "labeling-config.xml").write_text(labeling_config, encoding="utf-8")
-    if args.with_vlm:
-        from nh_parser_fin.parse.pipeline import run_full_pipeline
+    from nh_parser_fin.parse.pipeline import run_full_pipeline
 
-        p1, p3 = run_full_pipeline(
-            documents, tasks, out=out, media_dir=media_dir,
-            compact_output=args.compact_output,
+    p1, p3 = run_full_pipeline(
+        documents, tasks, out=out, media_dir=media_dir,
+        compact_output=args.compact_output,
+    )
+    print(f"P1/P3: 문서 {len(p1)}개 / {len(p3)}개")
+    if args.compact_output:
+        from nh_parser_fin.ocr.table_preview import write_table_previews
+        from report import build as build_report
+
+        media_map = {
+            (str(task["data"]["source_file"]), int(task["data"]["page_no"])):
+            media_dir / str(task["data"]["image"]).split("pages/", 1)[-1]
+            for task in tasks
+        }
+        write_table_previews(p1, media_map, out)
+        (out / "report.html").write_text(
+            build_report(out, f"NH 광고물 파싱 — {args.run_name}"), encoding="utf-8",
         )
-        print(f"P1/P3: 문서 {len(p1)}개 / {len(p3)}개")
-        if args.compact_output:
-            from nh_parser_fin.ocr.table_preview import write_table_previews
-            from report import build as build_report
-
-            media_map = {
-                (str(task["data"]["source_file"]), int(task["data"]["page_no"])):
-                media_dir / str(task["data"]["image"]).split("pages/", 1)[-1]
-                for task in tasks
-            }
-            write_table_previews(p1, media_map, out)
-            (out / "report.html").write_text(
-                build_report(out, f"NH 광고물 파싱 — {args.run_name}"), encoding="utf-8",
-            )
     print(f"\n완료: {out}")
     if not args.compact_output:
         print(f"Label Studio: {out / 'label-studio.json'}")

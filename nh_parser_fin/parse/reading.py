@@ -26,6 +26,7 @@ from typing import Any
 from PIL import Image
 
 from ..vlm import client as vlm_client
+from .adapters import DIGITAL_PRIMARY_SHARE, digital_line_share
 from .quality import flag
 
 # 공백을 지우고 비교하므로 띄어쓰기·줄바꿈만 다른 경우는 1.000 이 나온다.
@@ -257,13 +258,22 @@ def clean_text(value: Any) -> str:
 
 
 def _has_digital_evidence(region: dict[str, Any]) -> bool:
-    """PDF 내장 텍스트처럼 글자와 좌표를 직접 얻은 Region인지 확인한다."""
-    if str(region.get("text_source") or "").startswith(("digital_", "document_processor")):
+    """Region의 정본이 실제로 PDF 디지털 텍스트에 주로 의존하는지 확인한다."""
+    source = str(region.get("text_source") or "")
+    if source.startswith("document_processor"):
         return True
-    return any(
-        str(line.get("source") or "").casefold() == "digital"
-        for line in region.get("lines") or []
-    )
+    # HWP 구조와 교차 확인된 원문은 줄 출처 비율과 무관하게 보존한다.
+    if (
+        (region.get("hwp_structure_validation") or {}).get("status") == "agrees"
+        or (region.get("hwp_structure_corroboration") or {}).get("status") == "agrees"
+    ):
+        return True
+    lines = region.get("lines") or []
+    share = digital_line_share(lines)
+    if share is not None:
+        return share >= DIGITAL_PRIMARY_SHARE
+    # 줄 증거가 없는 기존 Region에는 출처 표기를 그대로 적용한다.
+    return source.startswith("digital_")
 
 
 def _store_judge(region: dict[str, Any], judge: dict[str, Any] | None) -> str:

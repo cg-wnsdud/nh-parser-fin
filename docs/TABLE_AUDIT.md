@@ -1,23 +1,17 @@
-# Paddle 표 후보 검출 실험 (2026-09-26)
+# Paddle 표 후보 검출 실험 기록 (2026-09-26)
 
-범위: `samples/` 20개 파일, 21페이지. 일반 P1/P3 파이프라인과 `main` 병합은 이 실험에서 실행하지 않았다.
+범위: `samples/` 20개 파일, 21페이지. 일반 P1/P3 파이프라인과 `main` 병합은 이 실험에서 실행하지 않았다. 아래는 당시 관찰이며 현재 운영 계약을 설명하는 문서는 [PIPELINE.md](PIPELINE.md)이다.
 
-## 경로
+## 당시 실험 경로
 
-- PDF: PDFium 렌더링·디지털 텍스트와 Paddle OCR. PDF `document-processor` 구조 추론은 기본 비활성화.
+- PDF: PDFium 렌더링·디지털 텍스트와 Paddle OCR. PDF `document-processor` 구조 추론은 당시 기본 비활성화였고 현재는 제거했다.
 - HWP: `document-processor` 문단·표 셀과 HTML 렌더링.
 - 이미지: 원본 이미지와 Paddle OCR.
 - 모든 페이지 이미지를 타일링 없이 Paddle에 한 번 입력하여 `table` 박스를 수집한다. 박스의 전체 페이지 오버레이 및 개별 크롭을 저장한다.
-- 각 후보는 VLM이 `table` / `field_list` / `not_table`로 판단한다. 의미 관계는 기존 텍스트 줄 ID만 선택하게 하고, 텍스트·좌표는 그 줄에서 결정론적으로 만든다. `verified`는 자동 점검 통과일 뿐 사람 검수의 정답 판정이 아니다.
+- 당시에는 각 후보를 VLM이 `table` / `field_list` / `not_table`로 판단하고 의미 관계를 만들었다. 이 방식은 현재 제거했다. 지금은 실제 표 여부만 검증하고 P3에 `kind=table`과 원문 평문을 보낸다.
 - PDFium 텍스트층이 OCR에 비해 한글 본문을 현저히 적게 담으면 OCR로 폴백한다.
 
-실행 예시 (`document-processor` 사설 패키지 접근 필요):
-
-```powershell
-uv run --no-sync --with ../document-processor python table_audit.py --run-name paddle-table-audit-samples --input samples
-```
-
-결과는 `outputs/paddle-table-audit-samples/report.html`, `results.json`, `summary.json`, `images/`에 있다. 기존 파일별 결과가 있으면 재사용하며, `--force '파일명 일부'`로 선택 재실행한다.
+독립 실험 실행기 `table_audit.py`는 운영 경로와 중복되어 제거했다. 당시 결과가 남아 있다면 `outputs/paddle-table-audit-samples/`에서 확인할 수 있다. 현재 실행은 `run.py` 한 경로로 한다.
 
 ## 관찰
 

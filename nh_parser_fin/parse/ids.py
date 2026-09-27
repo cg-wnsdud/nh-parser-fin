@@ -1,7 +1,6 @@
 """Final Region ID contract.
 
-PaddleX regions (``pN_r...``), recovered OCR/PDF regions (``pN_x...``), and
-temporary table anchors are useful while assembling a page.  They are internal
+PaddleX regions (``pN_r...``) and recovered OCR/PDF regions (``pN_x...``) are internal
 provenance, not a stable downstream contract.  At the end of parsing, this
 module gives every surviving region one page-scoped ``pN_rNNN`` ID without
 changing the region list order, bbox, text, or labels.
@@ -90,13 +89,11 @@ def normalize_region_ids(pages: list[dict[str, Any]]) -> None:
             _map_decision(region.get("semantic_decision"), mapping)
             _map_decision(region.get("label_decision"), mapping)
 
-        for area in page.get("table_areas") or []:
-            member_ids = [str(value) for value in area.get("member_ids") or []]
-            if member_ids:
-                area.setdefault("source_member_ids", list(member_ids))
-                area["member_ids"] = list(dict.fromkeys(
-                    mapping[value] for value in member_ids if value in mapping
-                ))
+        for check in page.get("table_checks") or []:
+            _map_reference(
+                check, "table_region_id", mapping,
+                source_key="source_table_region_id",
+            )
 
         for item in page.get("coarse_missing_candidates") or []:
             _map_decision(item, mapping)

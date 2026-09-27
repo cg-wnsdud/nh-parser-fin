@@ -20,6 +20,7 @@ from typing import Any
 MIN_REGION_OVERLAP = 0.5
 STRONG_AGREEMENT = 0.8
 VLM_CONFLICT = 0.5
+DIGITAL_PRIMARY_SHARE = 0.5
 
 
 def _area(bbox: list[int]) -> int:
@@ -38,6 +39,18 @@ def line_overlap_ratio(line_bbox: list[int], region_bbox: list[int]) -> float:
 
 def _normalized(text: str | None) -> str:
     return re.sub(r"\s+", "", text or "").casefold()
+
+
+def digital_line_share(lines: list[dict[str, Any]]) -> float | None:
+    """Region의 실제 줄 텍스트 중 PDF 디지털 출처의 글자 비율."""
+    lengths = [
+        (str(line.get("source") or "").casefold(), len(_normalized(line.get("text"))))
+        for line in lines
+    ]
+    total = sum(length for source, length in lengths if source in {"digital", "ocr"})
+    if not total:
+        return None
+    return sum(length for source, length in lengths if source == "digital") / total
 
 
 def digital_text_needs_ocr(
@@ -220,6 +233,12 @@ def build_page_evidence(
         region["ocr_evidence"] = ocr_evidence
         region["digital_evidence"] = digital_evidence
         region["lines"] = owned_lines
+        digital_share = digital_line_share(owned_lines)
+        region["digital_text_share"] = (
+            round(digital_share, 4) if digital_share is not None else None
+        )
+        has_digital = any(line.get("source") == "digital" for line in owned_lines)
+        digital_primary = digital_share is not None and digital_share >= DIGITAL_PRIMARY_SHARE
         line_text = "\n".join(
                 str(line.get("text") or "").strip()
                 for line in owned_lines
@@ -254,9 +273,12 @@ def build_page_evidence(
             if structured_primary:
                 region["text"] = block_text
                 region["text_source"] = region.get("block_text_source")
-            elif any(line.get("source") == "digital" for line in owned_lines):
+            elif digital_primary:
                 region["text"] = line_text
                 region["text_source"] = "digital_ocr_lines"
+            elif has_digital:
+                region["text"] = line_text
+                region["text_source"] = "ocr_digital_lines"
             elif missing:
                 region["text"] = line_text
                 region["text_source"] = "ocr_lines_block_incomplete"
@@ -281,8 +303,10 @@ def build_page_evidence(
             region["text_selection_status"] = "paddlex_only"
         elif line_text:
             region["text"] = line_text
-            has_digital = any(line.get("source") == "digital" for line in owned_lines)
-            region["text_source"] = "digital_ocr_fallback" if has_digital else "ocr_fallback"
+            region["text_source"] = (
+                "digital_ocr_fallback" if digital_primary else
+                "ocr_digital_fallback" if has_digital else "ocr_fallback"
+            )
             region["text_selection_status"] = "line_fallback"
             fallback_regions += int(bool(region["text"]))
         else:

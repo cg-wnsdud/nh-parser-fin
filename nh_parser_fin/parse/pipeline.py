@@ -20,13 +20,12 @@ from ..review.catalog import load_catalog
 from ..vlm import client as vlm_client
 
 from . import reading
-from . import tables
 from .export import build_p1, build_p3
 from .hwp_alignment import align_hwp_structure
 from .ids import normalize_region_ids
 from .quality import flag
 from .recovery import build_recovery_candidates
-from .relations import analyze_page_relations, document_row_relations
+from .visual_tables import verify_visual_tables
 from .semantic import (
     analyze_page_context,
     analyze_product_labels,
@@ -104,7 +103,7 @@ def _prepare_page(page: dict[str, Any]) -> dict[str, Any]:
     unassigned = prepared.get("unassigned_lines") or []
     # 상품 소유권을 알기 전에 같은 높이의 줄을 표 하나로 합치면 좌우 상품의 표가
     # 하나가 된다. 여기서는 작은 복구 후보로만 보존하고, 페이지 전체를 보는 의미
-    # 판정이 product_id와 table_areas를 정한 뒤 같은 상품 안에서만 합친다.
+    # 상품 소유권 판정 전에는 서로 다른 상품의 줄을 합치지 않는다.
     recovery_candidates = build_recovery_candidates(unassigned, page_no=page_no)
     structure_duplicates = [
         candidate for candidate in recovery_candidates
@@ -288,105 +287,17 @@ def _apply_ownership(
     _assign_reading_order(page)
 
 
-# 표 한 칸이 Region 하나로 흩어져 있을 수 있어 줄 수가 아니라 칸 수로 센다.
-MIN_TABLE_CELLS = 3
+def _place_tables(page: dict[str, Any]) -> None:
+    """구조 파서가 준 **정확한** 표 셀만 표로 확정한다.
 
-
-def _promote_vlm_table_areas(page: dict[str, Any]) -> list[dict[str, Any]]:
-    """VLM이 표라고 지목했는데 기하학이 놓친 자리를 표 Region으로 승격한다.
-
-    VLM은 **어디를 볼지와 합쳐도 되는지**만 알려준다. 승격된 Region의 좌표와
-    문구는 그 안에 있던 Region들의 OCR 줄에서 나온다. 모델 좌표는 쓰지 않는다.
-
-    합치지 않는 경우가 둘이다.
-
-    - `kind == "field_list"`: 시각적으로는 격자지만 각 행이 서로 다른 항목이다.
-      복수 라벨을 붙일 수 있어도 행 경계가 사라지면 서로 다른 의미가 한 텍스트로
-      섞이므로 합치지 않는다. 실측(2026-09-20): VLM 이 `2. 대출성상품` 의
-      항목명–값 블록을 confidence 1.0 으로 표라고 지목했다.
-    - 안에 든 Region 들의 상품 소속이 갈릴 때. 상품을 가로질러 합치면 심의
-      단위가 섞인다.
+    `document_processor` 셀은 문서 구조에서 나온 값이므로 P1 근거로 보존한다.
+    시각적 표의 셀·의미 관계는 이 단계에서 추정하지 않는다.
     """
-    areas = page.get("table_areas") or []
-    if not areas:
-        return []
-    page_no = int(page["page_no"])
-    promoted = []
-    for area in areas:
-        if str(area.get("kind") or "table") != "table":
-            continue
-        # 복구 Region 만 보면 안 된다 — 표 한 칸이 PaddleX Region 으로 잡혀 있을
-        # 수 있다. 실측: `2. 카드상품` 의 5칸 중 2칸이 PaddleX Region 이라 복구
-        # 3칸만으로는 줄 수 하한에 걸려 통째로 버려졌다.
-        pool = [
-            region for region in page["regions"]
-            if region.get("kind") != "table"
-            and region.get("bbox")
-            and (region.get("lines") or [])
-        ]
-        # VLM 은 좌표가 아니라 목록에 있는 ID 를 고른다. 좌표 추정은 실행마다
-        # 크게 흔들려 같은 표를 놓쳤다 — 한 번은 [10,55,40,65] 로 잘 찍고 다음
-        # 실행에서는 [46,56,58,65] 로 찍어 실제 표와 3% 만 겹쳤다.
-        wanted = {str(value) for value in (area.get("member_ids") or [])}
-        seeds = [region for region in pool if str(region["region_id"]) in wanted]
-        if len(seeds) < MIN_TABLE_CELLS:
-            continue
-        inside = tables.grow_cells(seeds, pool)
-        owners = {str(region.get("product_id") or "unknown") for region in inside}
-        if len(owners - {"unknown"}) > 1:
-            continue
-        # 새 pN_tNNN ID를 만들지 않는다. PaddleX가 table로 본 Region을 우선
-        # 기준점으로 삼고, 없으면 구성원 중 페이지 배열에서 가장 앞선 Region을
-        # 쓴다. 표 구조는 그 원래 region_id에 붙는다.
-        positions = {
-            str(region["region_id"]): index
-            for index, region in enumerate(page["regions"])
-        }
-        anchor = min(
-            inside,
-            key=lambda region: (
-                str((region.get("layout_observation") or {}).get("label") or "").casefold()
-                != "table",
-                positions.get(str(region["region_id"]), 10**9),
-            ),
-        )
-        merged = tables.merge_regions(
-            inside, region_id=str(anchor["region_id"]), anchor=anchor,
-        )
-        merged["promoted_by"] = {
-            "source": "vlm_table_area", "note": area.get("note"),
-            "confidence": area.get("confidence"),
-        }
-        gone = {str(region["region_id"]) for region in inside}
-        insert_at = min(positions[region_id] for region_id in gone)
-        page["regions"] = [
-            region for region in page["regions"] if str(region["region_id"]) not in gone
-        ]
-        page["regions"].insert(insert_at, merged)
-        # 사라진 Region 을 가리키던 연결을 새 표 Region 으로 옮긴다. 그대로 두면
-        # 읽기 순서 배치가 대상을 잃는다.
-        for region in page["regions"]:
-            if str(region.get("related_region_id") or "") in gone:
-                region["related_region_id"] = merged["region_id"]
-        promoted.append(merged)
-    if promoted:
-        _assign_reading_order(page)
-    return promoted
-
-
-def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
-    """표로 보이는 Region의 OCR 줄을 행·열에 배치한다.
-
-    PaddleX가 `table`로 잡았든(A) 못 잡았든(B) 다른 라벨을 붙였든(C) 같은 경로로
-    다시 읽는다. PaddleX의 표 판정은 대상 선정 힌트로만 쓴다.
-    """
-    _promote_vlm_table_areas(page)
     placed = 0
     for region in page.get("regions") or []:
         existing_table = region.get("table") or {}
         if existing_table.get("source") == "document_processor":
-            # PDF 내부 셀과 bbox에서 직접 복원한 표 행이다. 같은 crop을 VLM으로 다시
-            # 배치하면 정확한 셀을 근사 결과로 덮게 되므로 구조를 그대로 신뢰한다.
+            # HWP 원본/HTML DOM 셀은 시각적 추정으로 덮지 않는다.
             region["kind"] = "table"
             region["table_status"] = "complete"
             cells = [
@@ -405,73 +316,7 @@ def _place_tables(page: dict[str, Any], image: Image.Image) -> None:
             }
             placed += 1
             continue
-        lines = [line for line in region.get("lines") or [] if line.get("bbox")]
-        # PaddleX 라벨은 `region["label"]` 이 아니라 `layout_observation` 안에 있다.
-        # 키를 잘못 읽는 바람에 "PaddleX 가 table 이라 부른 영역" 경로가 한 번도
-        # 발동하지 않았다 — 실측(2026-09-20, 9개 파일): 후보 5개 중 1개만 복원됐고
-        # 나머지 4개는 전부 `우대 조건 | 우대 금리` 형태의 진짜 2열 표였다.
-        layout_label = str(
-            (region.get("layout_observation") or {}).get("label")
-            or region.get("label") or ""
-        ).casefold()
-        is_candidate = (
-            region.get("kind") == "table"
-            or layout_label == "table"
-            or tables.looks_like_grid(lines)
-        )
-        if not is_candidate or len(lines) < tables.MIN_LINES:
-            continue
-        grid = tables.place_cells(image, region)
-        if not grid:
-            region["table_status"] = "not_a_table"
-            continue
-        region["kind"] = "table"
-        region["table"] = grid
-        # 원래 줄 이어붙이기는 후보로 남긴다. 모든 줄이 셀/주석에 배치되고 신뢰도가
-        # 충분할 때만 격자 표현을 정본으로 쓴다. 불완전 표가 정확한 OCR 줄을 P3에서
-        # 가리는 일을 막는다.
-        assembled = str(region.get("text") or "").strip() or "\n".join(
-            str(line.get("text") or "").strip() for line in lines
-            if str(line.get("text") or "").strip()
-        )
-        region["text_candidates"] = {
-            **(region.get("text_candidates") or {}),
-            "line_assembled": assembled,
-            "table_grid": grid["text_grid"],
-        }
-        slots = max(1, int(grid["grid"]["rows"]) * int(grid["grid"]["cols"]))
-        density = len([cell for cell in grid["cells"] if str(cell.get("text") or "").strip()]) / slots
-        region["table_cell_density"] = round(density, 4)
-        complete = (
-            not grid["unplaced_line_refs"]
-            and grid["confidence"] >= 0.7
-            and density >= 0.3
-            and len(grid.get("notes") or []) <= len([
-                cell for cell in grid["cells"] if str(cell.get("text") or "").strip()
-            ])
-        )
-        region["table_status"] = "complete" if complete else "partial"
-        if complete:
-            # 셀 배치는 구조 힌트일 뿐 원문을 대체하지 않는다. Markdown 격자를
-            # selected_text로 쓰면 완전/부분 표에 따라 표현이 달라지고, 잘못 배치된
-            # 셀이 검색 텍스트까지 오염시킨다.
-            region["text"] = assembled
-            region["text_source"] = "ocr_table_lines"
-        else:
-            region["text"] = assembled
-            # 표 구조는 P1/P3에 남지만 selected_text는 모든 원문 줄을 보존한다.
-            region["text_source"] = "ocr_table_lines_fallback"
-            if grid["unplaced_line_refs"]:
-                flag(region, "table_unplaced_lines")
-            if grid["confidence"] < 0.7:
-                flag(region, "table_low_confidence")
-            if density < 0.3:
-                flag(region, "table_sparse_grid")
-            if len(grid.get("notes") or []) > len([
-                cell for cell in grid["cells"] if str(cell.get("text") or "").strip()
-            ]):
-                flag(region, "table_structure_incomplete")
-        placed += 1
+        # 구조 셀이 없으면 일반 Region으로 두고 이미지 기반 표 여부만 뒤에서 검증한다.
     page["table_count"] = placed
 
 
@@ -667,7 +512,7 @@ def _write_stage_views(documents: list[dict[str, Any]], out: Path) -> None:
                     for region in page.get("regions") or []
                     if region.get("vlm_reading")
                 ],
-                "table_areas": copy.deepcopy(page.get("table_areas") or []),
+                "table_checks": copy.deepcopy(page.get("table_checks") or []),
                 "semantic_bands": copy.deepcopy(page.get("semantic_bands") or []),
                 "region_decisions": [
                     copy.deepcopy(region.get("semantic_decision"))
@@ -740,12 +585,16 @@ def run_full_pipeline(
             _apply_ownership(page, result)
             # 표 구조는 라벨링보다 먼저 복원한다. 라벨러가 셀 낱개가 아니라
             # 표 하나를 보게 해야 구분값을 한 번만 붙인다.
-            _place_tables(page, images[int(page["page_no"])])
+            _place_tables(page)
             align_hwp_structure(page)
             # 영역 판독도 라벨링 앞이다. 깨진 텍스트로 라벨을 정하면 엉뚱한
             # 구분값이 붙는다 — `2. 대출성상품` p1_r025 는 `)` 한 글자로
             # `상품명` 라벨을 받았다.
             reading.read_page(page, images[int(page["page_no"])], scope=read_scope)
+            # Reader/Judge가 고른 원문을 바탕으로 표 후보만 검증한다. 표가 여러
+            # Region에 흩어졌어도 한 심의 항목일 때만 기존 ID로 묶는다.
+            verify_visual_tables(images[int(page["page_no"])], page)
+            _assign_reading_order(page)
             page["semantic_status"] = "complete"
 
         # 2단계 — 상품별 템플릿. 소유권이 나와야 상품군을 알 수 있으므로 여기서 푼다.
@@ -763,19 +612,6 @@ def run_full_pipeline(
         # VLM/표/텍스트/라벨 판단이 모두 끝난 뒤 외부 ID만 통일한다.
         # 배열 순서를 바꾸지 않으므로 reading_order와 상품 소유권은 그대로다.
         normalize_region_ids(pages)
-        for page in pages:
-            # 페이지 전체 VLM이 찾은 표 구역 안에서 원문 라인의 의미 짝을 판정한다.
-            # Region을 합치지 않으므로 기존 라벨·좌표·심의 참조 ID가 유지된다.
-            if doc["file_type"] in {"hwp", "hwpx"}:
-                # HWP 원본 표의 행/셀 경계가 있으므로 Paddle의 넓은 후보로
-                # 여러 항목을 다시 묶지 않는다.
-                document_row_relations(page)
-                if not page["semantic_structures"]:
-                    # 구조 파서가 셀을 주지 못한 페이지는 PDF/이미지와 같은
-                    # 시각적 후보 검증 경로로 보낸다.
-                    analyze_page_relations(images[int(page["page_no"])], page)
-            else:
-                analyze_page_relations(images[int(page["page_no"])], page)
         doc["review_units"] = review_units(pages, product_templates)
 
         p1 = build_p1(doc)

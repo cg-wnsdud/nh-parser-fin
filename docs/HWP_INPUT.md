@@ -1,96 +1,29 @@
 # HWP/HWPX 입력 처리
 
-> **개발 상태(2026-09-23):** 이 기능은 아직 `main`에 병합되지 않은 개발 브랜치에서
-> 구현·검증 중이다. 요청 시 전달된 이름은 `codex/hwp-input-rendering`이지만 현재 Git 상태에서는
-> `feat/hwp-input-render`이 `origin/feat/hwp-input-render`을 추적한다. 인수인계 ZIP 생성 전에
-> 최종 브랜치명을 반드시 확인해야 한다.
+현재 개발 브랜치 `feat/hwp-input-render`의 실행 경로를 설명합니다. 진입점은 PDF·이미지와 같은 `run.py`입니다.
 
-## 처리 흐름
+## 페이지와 구조 텍스트
 
-HWP 입력은 한 가지 추출 결과에 의존하지 않는다.
+1. `ingest/hwp_structure.py`가 사내 `document-processor`로 문단·원본 표 셀을 읽습니다. 사용할 수 없거나 파싱에 실패하면 Kordoc으로 폴백합니다. `HWP_STRUCTURE_ENGINE`으로 한 경로만 지정할 수도 있습니다.
+2. `ingest/hwp_render.py`가 화면 좌표의 기준이 될 PDF를 로컬에서 만듭니다. `auto`는 Windows에서 한컴 COM → document-processor HTML/Chromium → LibreOffice 순서, Linux에서 HTML/Chromium → LibreOffice 순서입니다. `HWP_RENDER_BACKEND`로 지정할 수 있습니다.
+3. PDFium이 변환 PDF를 페이지 이미지로 렌더하고 디지털 텍스트 줄과 bbox를 읽습니다. 구조 텍스트는 렌더 페이지의 텍스트와 대조해 페이지별로 다시 배분합니다.
+4. HTML 경로가 DOM 행을 제공하면 `structured_fast` 또는 `hybrid`로 처리합니다. `structured_fast`는 구조 행이 충분할 때 Paddle 호출을 생략하고, `hybrid`는 구조 행에 Paddle 시각 요소를 보완합니다. 그 밖에는 기존 Paddle/OCR 시각 경로로 갑니다.
+5. `parse/hwp_alignment.py`가 좌표 없는 원본 문구·셀을 화면 Region과 대조합니다. 충분히 맞는 문구만 최종 텍스트로 사용하고, 보이지 않는 이미지 글자는 OCR/VLM 결과로 보완합니다.
 
-1. Kordoc이 문단, 표, 병합 셀, 중첩 표를 구조 텍스트로 추출한다.
-2. 설치된 한컴오피스의 `HWPFrame.HwpObject` COM Automation이 원본을 로컬 PDF로 저장한다.
-3. 기존 PDF 경로가 페이지 이미지와 디지털 텍스트 bbox를 만든다.
-4. 기존 PaddleX가 화면 Region bbox와 이미지에만 있는 문구를 찾는다.
-5. HWP 구조 노드를 Region에 정렬한다. 내용이 충분히 일치하면 HWP 문자열을 정본으로
-   선택하고, bbox는 PDF/PaddleX 좌표를 유지한다.
-6. 구조 셀 하나가 여러 Region을 가로지르면 문자열을 한 Region에 덮어쓰지 않고
-   PDF 텍스트 검증 근거로만 사용한다.
-7. VLM은 상품 소유권, 판독 대조, 템플릿, 구분값을 판정한다. HWP 구조와 PDF 텍스트가
-   일치한 문구는 VLM 한 번의 오독 때문에 검수 대상으로 바뀌지 않는다.
+따라서 구조 파싱은 **문구·셀의 근거**, 렌더 이미지와 PDF/Paddle 결과는 **사용자 화면의 bbox 근거**입니다. 변환 PDF는 화면 좌표를 얻기 위한 중간 산출물이며, PDF 입력에 사내 구조 파서를 적용하는 분기는 없습니다.
 
-구조에 없는 배경 이미지 문구와 로고는 OCR/VLM Region으로 남는다. 따라서 HWP 구조
-텍스트는 내용 정본이며, PDF/OCR은 bbox와 시각 전용 문구를 보강하는 역할을 한다.
+## 표와 심의 입력
 
-파이프라인에서 결합되는 순서는 다음과 같다.
+원본 구조의 표 객체가 있다고 해서 전부 금융상품 데이터 표는 아닙니다. 배치용 큰 표는 `layout_container`로 분류합니다. 화면 Region에 정확히 대응하는 원본/HTML 셀만 P1 `table.cells`에 보존하고, P3에는 확정된 표 Region의 `kind: "table"`, `selected_text`, `bbox`, `labels`만 보냅니다.
 
-```text
-Kordoc 구조 파싱 ──→ 실제 PDF 페이지별 구조 재분배 ───────────────┐
-                                                                 ↓
-한컴 COM PDF 렌더 → PDF 이미지·디지털 bbox → PaddleX → 소유권·표 → HWP 구조 정렬
-                                                                 ↓
-                                                     Reader/Judge → 템플릿·라벨 → P1/P3
-```
+Paddle이 표라고 표시한 시각 후보와 페이지 VLM이 찾은 누락 후보는 `parse/visual_tables.py`에서 페이지·확대 이미지를 함께 보고 검증합니다. 서로 다른 상품이나 독립 심의 항목을 한 표로 합치지 않습니다. 여러 Region으로 나뉜 한 표는 기존 원문과 bbox의 합집합으로 한 Region에 담으며, VLM 셀 격자나 항목·값 관계를 새로 만들지 않습니다. 거부한 후보도 원래 텍스트 Region으로 남습니다.
 
-구조 정렬이 표 배치 뒤에 있는 이유는 VLM이 만든 표 가설을 Kordoc의 실제 문단·셀 구조와 비교할
-수 있어야 하기 때문이다. Reader보다 앞에 있는 이유는 구조와 PDF가 합의한 정본을 VLM 한 번의
-오독으로 교체하지 않기 위해서다.
+## 실행 환경과 실패 정책
 
-## 표 처리
+- 사내 `document-processor`가 설치되면 구조 파싱과 HTML 렌더에서 우선 사용합니다. Kordoc 폴백에는 Node.js와 고정 버전 `KORDOC_COMMAND`가 필요합니다.
+- HTML 렌더에는 Chromium/Chrome/Edge가 필요하며 `HWP_CHROMIUM`으로 지정할 수 있습니다. LibreOffice 폴백에는 `soffice`가 필요합니다. Windows 한컴 COM에는 설치형 한컴오피스가 필요합니다.
+- `HWP_RENDER_DIR`을 지정하면 중간 PDF를 보존합니다. `HWP_REVIEW_DIR`을 지정하면 HTML 검토 화면을 보존합니다.
+- 구조 파서 또는 모든 렌더 백엔드가 실패하면 HWP 입력은 명시적으로 중단합니다. 예전 내장 이미지 자산을 가상 페이지로 만드는 경로는 제거했습니다.
+- HTML/LibreOffice 조판은 한컴 원본 화면과 다를 수 있습니다. 심의 화면의 bbox는 **실제로 선택된 렌더 결과 이미지**를 기준으로 표시해야 합니다.
 
-HWP에서 `table`은 항상 업무상 데이터 표를 뜻하지 않는다. 문서 전체의 배경, 제목,
-여백을 배치하려고 17×7 표를 쓰는 파일도 있다. 이런 큰 희소 병합표와 이미지 중심의
-1열 표는 `layout_container`로 기록하고 P3 셀 행렬로 보내지 않는다.
-
-작고 모든 셀 문구가 한 Region에서 확인된 표만 Kordoc 셀 순서를 정본으로 사용한다.
-P1에는 전체 셀, 병합 정보와 출처를 보존하고 P3에는 반복 키가 없는 `shape`와 `rows`
-행렬만 싣는다. 셀 구조가 확인되지 않은 표는 정제된 본문과 bbox만 전달한다.
-
-## 실행 환경
-
-- `KORDOC_COMMAND`: 기본값 `npx --yes kordoc@4.14.1`. 운영에서는 설치된 고정 버전의
-  실행 경로를 지정하는 편이 재현성과 네트워크 통제에 유리하다.
-- `KORDOC_VERSION`: P1 provenance에 기록할 버전. 기본값 `4.14.1`.
-- `KORDOC_TIMEOUT`: 구조 파싱 제한 시간(초). 기본값 `180`.
-- `HWP_AUTOMATION_SECURITY_MODULE`: 한컴 공식 Automation 보안 승인 DLL 경로.
-- `HWP_RENDER_TIMEOUT`: HWP→PDF 제한 시간(초). 기본값 `300`.
-- `HWP_RENDER_DIR`: 지정하면 중간 PDF를 보존한다. 없으면 임시 디렉터리에서 처리한다.
-
-기본 Kordoc 명령은 최초 실행 시 npm 네트워크를 사용할 수 있다. 운영 환경에서는 설치·검증한
-고정 버전 실행 파일을 배치하고 `KORDOC_COMMAND`에 그 경로를 지정하는 편이 안전하다.
-
-현재 코드는 한컴 서버나 Hwp SDK API를 호출하지 않는다. 설치형 한컴오피스를 현재
-Windows 사용자 세션에서 COM으로 제어하므로 문서 데이터는 로컬에 남는다. 보안 승인
-모듈도 한컴 개발자 자료의 로컬 파일 접근 승인 모듈이다.
-
-운영에서 Hwp SDK를 도입할 때는 `HWP/HWPX → PDF` 구현만 SDK 어댑터로 교체하면 된다.
-그 뒤의 PDF 렌더, 디지털 bbox, PaddleX, 구조 정렬, VLM, P1/P3 단계는 그대로 재사용한다.
-
-## 현재 실패 정책과 남은 제약
-
-- Kordoc 구조 파싱 또는 한컴 PDF 렌더가 실패하면 해당 HWP 입력은 중단한다. 과거의 내장 이미지
-  추출 방식으로 자동 폴백하지 않는다.
-- Kordoc 구조에는 bbox가 없으므로 정규화 문자열, 문서 순서, 줄 포함 관계로 시각 Region에
-  정렬한다. 구조 노드가 하나도 맞지 않으면 `hwp_structure_page_unmatched` 검수 사유를 남긴다.
-- `boxes/*.json`에는 아직 HWP 구조 원본이 없어서 `replay.py`만으로 구조 정렬 단계까지 완전히
-  재현할 수 없다. 현재는 원본 HWP 재실행 또는 P1 근거 확인이 필요하다.
-- HWP 렌더 경로는 Windows와 설치형 한컴오피스에 종속된다. PDF·이미지 입력은 이 의존성과
-  무관하게 기존대로 실행된다.
-
-관련 자료:
-
-- [Kordoc](https://github.com/chrisryugj/kordoc)
-- [한컴 HwpAutomation 안내](https://developer.hancom.com/hwpautomation)
-- [한컴 Hwp SDK](https://online.hancom.com/en/product/sdk/hwpSdk)
-
-## 009·010 실측
-
-- `NH농협은행-2026_009-예금성.hwp`: 한컴 렌더 2쪽. Kordoc 문단 32개와 조판용
-  3×1 표를 추출했다. Kordoc이 모든 블록을 논리 1쪽으로 표시했지만 PDF 텍스트층과
-  대조해 심의필·수신거부 두 문단을 실제 2쪽으로 재배치했다.
-- `NH농협은행-2026_010-대출성.hwp`: 한컴 렌더 1쪽. 17×7 조판 표와 중첩 1×2
-  상환방식 표, 1×6 연락처 표를 추출했다. 17×7은 P1 구조 근거로만 유지하고, 한
-  Region에서 완전히 확인된 1×2 표만 P3 압축 행렬로 전달했다.
-- 010의 `금융의 모든 순간`은 HWP 구조/PDF 텍스트층에 없지만 렌더 이미지에서
-  OCR/VLM Region으로 회수됐다.
+HWP를 외부 한컴 서버로 보내는 SDK 호출은 사용하지 않습니다. PaddleX/VLM 호출에는 렌더된 페이지 이미지가 전송됩니다.

@@ -88,72 +88,6 @@ def media_index(run: Path) -> dict[tuple[str, int], Path]:
     return index
 
 
-def _table_grid(table: dict[str, Any]) -> tuple[int, int, list[list[str]], list[list[bool]]]:
-    """P3 v6(`shape`+`rows`)과 v5(`grid`+`cells`)를 같은 모양으로 읽는다.
-
-    v6은 검증된 표만 `rows` 행렬을 싣고, 부분 표는 `shape`만 준다. 예전 실행의
-    리포트도 다시 만들 수 있어야 해서 두 형태를 모두 받는다.
-    """
-    if "shape" in table:                                    # v6
-        shape = table.get("shape") or [0, 0]
-        rows, cols = int(shape[0] or 0), int(shape[1] or 0)
-        matrix = table.get("rows") or []
-        header_rows = set(int(r) for r in (table.get("header_rows") or []))
-        cells = [
-            [
-                html.escape(str((matrix[r][c] if r < len(matrix) and c < len(matrix[r]) else None) or ""))
-                for c in range(cols)
-            ]
-            for r in range(rows)
-        ]
-        header = [[r in header_rows] * cols for r in range(rows)]
-        return rows, cols, cells, header
-
-    grid = table.get("grid") or {}                          # v5
-    rows, cols = int(grid.get("rows") or 0), int(grid.get("cols") or 0)
-    cells = [["" for _ in range(cols)] for _ in range(rows)]
-    header = [[False] * cols for _ in range(rows)]
-    for cell in table.get("cells") or []:
-        row, col = int(cell["row"]), int(cell["col"])
-        if 0 <= row < rows and 0 <= col < cols:
-            cells[row][col] = html.escape(str(cell.get("text") or ""))
-            header[row][col] = bool(cell.get("is_header"))
-    return rows, cols, cells, header
-
-
-def _table_html(table: dict[str, Any]) -> str:
-    rows, cols, cells, header = _table_grid(table)
-    status = str(table.get("status") or "")
-    out: list[str] = []
-    # v6의 부분 표는 셀 행렬을 싣지 않는다. 격자를 비워 그리면 "값이 없다"로 오해되므로
-    # 상태를 먼저 밝히고, 내용은 아래 `최종 선택 텍스트`(OCR 원문 줄)를 보게 한다.
-    if status and status != "complete":
-        out.append(
-            f"<div class='warn'>표 구조 미검증 (<code>{html.escape(status)}</code>, "
-            f"{rows}×{cols}) — 셀 배치는 P1에만 있습니다. 내용은 아래 원문을 보세요.</div>"
-        )
-    if rows and cols and any(any(row) for row in cells):
-        out.append("<table class='grid'>")
-        for r in range(rows):
-            out.append("<tr>")
-            for c in range(cols):
-                tag = "th" if header[r][c] else "td"
-                out.append(f"<{tag}>{cells[r][c]}</{tag}>")
-            out.append("</tr>")
-        out.append("</table>")
-    # v6은 notes 가 문자열 목록, v5는 {"text": ...} 목록이다.
-    notes = [
-        str(note if isinstance(note, str) else (note or {}).get("text") or "").strip()
-        for note in table.get("notes") or []
-    ]
-    notes = [value for value in notes if value]
-    if notes:
-        out.append("<div class='table-notes'><b>표 관련 문구</b>")
-        out.extend(f"<div>{html.escape(value)}</div>" for value in notes)
-        out.append("</div>")
-    return "".join(out)
-
-
 def _region_html(region: dict[str, Any]) -> str:
     product = str(region.get("product_id") or "unknown")
     entries = region.get("labels") or []
@@ -170,24 +104,12 @@ def _region_html(region: dict[str, Any]) -> str:
     else:
         chips.append("<span class='chip none'>라벨 없음</span>")
     if region.get("kind") == "table":
-        # v6은 검증된 표만 셀 행렬을 싣는다. 화면에서 그 차이를 알 수 있어야
-        # "표인데 격자가 없다"를 버그로 오해하지 않는다.
-        status = str((region.get("table") or {}).get("status") or "")
-        mark = {"complete": "표", "partial": "표(미검증)"}.get(status, "표")
-        chips.append(f"<span class='chip alt'>{mark}</span>")
+        chips.append("<span class='chip alt'>표</span>")
     if region.get("needs_review"):
         chips.append("<span class='chip rev'>검수</span>")
 
-    if region.get("table"):
-        selected = html.escape(str(region.get("selected_text") or "")).replace("\n", "<br>")
-        body = _table_html(region["table"])
-        body += (
-            "<details><summary>최종 선택 텍스트</summary>"
-            f"<div class='text'>{selected}</div></details>"
-        )
-    else:
-        text = html.escape(str(region.get("selected_text") or "")).replace("\n", "<br>")
-        body = f"<div class='text'>{text or '<i>(빈 텍스트)</i>'}</div>"
+    text = html.escape(str(region.get("selected_text") or "")).replace("\n", "<br>")
+    body = f"<div class='text'>{text or '<i>(빈 텍스트)</i>'}</div>"
 
     return (
         f"<li class='region' id='r-{html.escape(str(region['region_id']))}' "
@@ -195,37 +117,6 @@ def _region_html(region: dict[str, Any]) -> str:
         f"<div class='head'><span class='rid'>{html.escape(str(region['region_id']))}</span>"
         f"{''.join(chips)}</div>{body}</li>"
     )
-
-
-def _structures_html(page: dict[str, Any]) -> str:
-    """P3의 표 의미 짝을 Region 원문과 나란히 보여 준다."""
-    structures = page.get("semantic_structures") or []
-    if not structures:
-        return ""
-    output = ["<section class='structures'><h2>표·항목의 의미 관계 (P3)</h2>"]
-    for structure in structures:
-        title = html.escape(str(structure.get("field_label") or structure.get("kind") or "표"))
-        status = str(structure.get("status") or "unresolved")
-        output.append(
-            f"<div class='structure'><div class='head'><b>{title}</b>"
-            f"<span class='rid'>{html.escape(str(structure.get('structure_id') or ''))}</span>"
-            f"<span class='chip alt'>{html.escape(status)}</span></div>"
-        )
-        relations = structure.get("relations") or []
-        if relations:
-            output.append("<table class='relations'><tr><th>상위 분류</th><th>조건·항목</th><th>금리·내용</th><th>원문 위치</th></tr>")
-            for relation in relations:
-                context = html.escape(str(relation.get("context") or "")).replace("\n", "<br>")
-                key = html.escape(str(relation.get("key") or "")).replace("\n", "<br>")
-                value = html.escape(str(relation.get("value") or "")).replace("\n", "<br>")
-                bbox = html.escape(", ".join(str(x) for x in relation.get("bbox") or []))
-                output.append(f"<tr><td>{context}</td><td>{key}</td><td>{value}</td><td><code>{bbox}</code></td></tr>")
-            output.append("</table>")
-        else:
-            output.append("<div class='warn'>원문 줄의 의미 관계를 확인하지 못했습니다. 아래 Region 원문을 확인하세요.</div>")
-        output.append("</div>")
-    output.append("</section>")
-    return "".join(output)
 
 
 def _paddle_preview_html(preview: dict[str, Any] | None) -> str:
@@ -273,7 +164,7 @@ def _summary_html(document: dict[str, Any], page: dict[str, Any]) -> str:
     regions = page["regions"]
     rows = [
         ("Region", len(regions)),
-        ("표", sum(1 for r in regions if r.get("table"))),
+        ("표", sum(1 for r in regions if r.get("kind") == "table")),
         ("복수 라벨", sum(1 for r in regions if len(r.get("labels") or []) > 1)),
         ("라벨 없음", sum(1 for r in regions if not r.get("labels"))),
         ("검수 필요", sum(1 for r in regions if r.get("needs_review"))),
@@ -345,7 +236,7 @@ def build(run: Path, title: str) -> str:
                 f"<div class='left'><div class='canvas'>"
                 f"<img src='{uri}' alt='{html.escape(source_file)}'>"
                 f"{_boxes_svg(page, width, height)}</div></div>"
-                f"<div class='right'>{_structures_html(page)}<ol class='regions'>{regions}</ol></div>"
+                f"<div class='right'><ol class='regions'>{regions}</ol></div>"
                 f"</div></section>"
             )
 
@@ -442,20 +333,6 @@ ol.regions {{ list-style:none; margin:0; padding:0; }}
 .span b {{ font-size:12px; color:#2E7D32; }}
 .span i {{ font-size:12px; color:var(--muted); }}
 .note {{ font-size:11px; color:var(--muted); margin-top:4px; }}
-table.grid {{ border-collapse:collapse; font-size:12px; width:100%; }}
-table.grid th, table.grid td {{ border:1px solid var(--line); padding:3px 6px; }}
-table.grid th {{ background:#eef1f4; }}
-.structures {{ margin-bottom:14px; }}
-.structures h2 {{ font-size:13px; margin:0 0 6px; }}
-.structure {{ background:#fff; border:1px solid var(--line); border-radius:6px;
-  padding:8px 10px; margin-bottom:6px; }}
-table.relations {{ border-collapse:collapse; font-size:12px; width:100%; table-layout:fixed; }}
-table.relations th, table.relations td {{ border:1px solid var(--line); padding:4px 6px;
-  vertical-align:top; word-break:break-word; }}
-table.relations th {{ background:#eef1f4; }}
-table.relations th:first-child {{ width:16%; }}
-table.relations th:last-child {{ width:16%; }}
-table.relations code {{ font-size:10px; color:var(--muted); }}
 .paddle-preview {{ background:#fff; border:1px solid var(--line); border-radius:6px;
   padding:7px 10px; margin-bottom:10px; }}
 .paddle-preview summary {{ cursor:pointer; font-weight:600; }}
@@ -545,6 +422,7 @@ function link(root) {{
       }}
     }});
   }});
+
 }}
 panes.forEach(link);
 </script></body></html>

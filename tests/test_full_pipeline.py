@@ -211,11 +211,11 @@ def test_long_page_keeps_table_area_without_optional_bbox(monkeypatch):
     monkeypatch.setattr(semantic, "analyze_page_ownership", lambda *args, **kwargs: {
         "analysis": "", "products": [], "region_decisions": [],
         "recovery_decisions": [], "missing_visible_text": [],
-        "table_areas": [{"kind": "field_list", "member_ids": ["r1", "r2"], "note": "행"}],
+        "table_areas": [{"member_ids": ["r1", "r2"], "note": "표"}],
     })
 
     result = semantic.analyze_page_context(Image.new("RGB", (1000, 3000)), page, [])
 
     assert result["table_areas"] == [
-        {"kind": "field_list", "member_ids": ["r1", "r2"], "note": "행"},
+        {"member_ids": ["r1", "r2"], "note": "표"},
     ]
