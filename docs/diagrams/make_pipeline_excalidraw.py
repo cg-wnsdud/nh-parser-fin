@@ -504,7 +504,8 @@ STAGE_ROW2 = [
      "  맞을 때만 vlm_structure_verified 로 정규화\n"
      "· 그 뒤 visual_tables.py 가 Paddle/VLM 표\n"
      "  후보를 페이지+확대 이미지로 확인\n"
-     "· 기존 ID 만 병합, P3 kind=table/평문\n"
+     "· 기존 ID 만 병합, 표 전체를 다시 Judge 판독\n"
+     "· P3 kind=table/평문, text_source=vlm\n"
      "· PARSER_V2_READING_SCOPE  all / targeted / off"),
     ("⑫ 상품별 심의 템플릿", "vlm",
      "parse/templates.py · review/resolution.py\n"
@@ -674,7 +675,7 @@ card(
     "계약 nh-ad-region-review-input-v9\n\n"
     "{ region_id, product_id, bbox, selected_text,\n"
     "  labels, kind, needs_review, text_source }\n"
-    "검증된 표는 kind=table · selected_text 평문.\n"
+    "검증된 시각 표는 kind=table · VLM 평문.\n"
     "읽기 순서와 역색인은 싣지 않는다. 근거 참조는\n"
     "순번이 아니라 region_id 를 쓴다.\n\n"
     "후속 심의 결과 계약은 별도다.\n"

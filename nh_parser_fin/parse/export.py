@@ -141,8 +141,9 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             "reference_policy": "P1 and P3 share region_id; review results return region_ids",
             "table_policy": (
                 "verified visual tables and source-structure tables use kind=table; "
-                "selected_text retains source wording in reading order; "
-                "cell evidence and verification stay in P1"
+                "visual tables use the final whole-table VLM Judge text when available; "
+                "source-structure tables retain their source text; "
+                "cell evidence, parser candidates, and verification stay in P1"
             ),
         },
         "document": {

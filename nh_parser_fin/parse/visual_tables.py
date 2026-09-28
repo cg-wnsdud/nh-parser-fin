@@ -12,6 +12,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from ..vlm import client as vlm_client
+from . import reading
 from .quality import flag
 
 
@@ -188,6 +189,85 @@ def _plain_text(regions: list[dict[str, Any]]) -> tuple[str, bool]:
     ).strip(), False
 
 
+def _remove_unexplained_repeats(text: str, parser_text: str) -> tuple[str, int]:
+    """원문 후보에 한 번 있는 긴 줄만 VLM의 연속 중복에서 한 번으로 줄인다."""
+    parser = _normalized(parser_text)
+    kept: list[str] = []
+    removed = 0
+    for line in text.splitlines():
+        normalized = _normalized(line)
+        if (
+            kept and len(normalized) >= 8
+            and normalized == _normalized(kept[-1])
+            and parser.count(normalized) == 1
+        ):
+            removed += 1
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip(), removed
+
+
+def _select_visual_table_text(
+    image: Image.Image, anchor: dict[str, Any], *, grouped: bool,
+) -> bool:
+    """표 전체의 VLM 판독을 정본으로 쓰고 교체 전 문장은 P1에 보존한다."""
+    parser_text = str(anchor.get("text") or "")
+    candidates = anchor.setdefault("text_candidates", {})
+    candidates["pre_table_vlm"] = parser_text
+    # 단일 표의 기존 Judge는 전체 bbox를 보았으므로 표 전용 Judge의 참고
+    # 후보로만 쓴다. 그룹 앵커의 Judge는 병합 전 한 조각만 본 것이므로 제외한다.
+    prior = anchor.get("vlm_judge") or {}
+    reader_text = (
+        str(prior.get("text") or "") if not grouped else None
+    )
+    method = "table_judge_from_region" if reader_text else "full_table_judge"
+    try:
+        result = reading.read_visual_table(image, anchor, parser_text, reader_text)
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        anchor["table_reading"] = {
+            "status": "failed", "error": f"{type(exc).__name__}: {exc}"[:200],
+        }
+        flag(anchor, "table_vlm_read_failed")
+        return False
+    if not result or not reading._normalized(result.get("text")):
+        anchor["table_reading"] = {"status": "blank", "method": method}
+        flag(anchor, "table_vlm_read_blank")
+        return False
+    try:
+        confidence = float(result.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < 0.7:
+        anchor["table_reading"] = {
+            "status": "low_confidence", "method": method,
+            "confidence": confidence, "text": str(result["text"]),
+        }
+        flag(anchor, "table_vlm_read_low_confidence")
+        return False
+    final_text, removed_repeats = _remove_unexplained_repeats(
+        reading.clean_text(result["text"]), parser_text,
+    )
+    candidates["vlm_table_judge"] = final_text
+    if prior:
+        candidates["pre_table_judge"] = str(prior.get("text") or "")
+    if result.get("reader_text"):
+        candidates["vlm_table_reader"] = str(result["reader_text"])
+    anchor["vlm_judge"] = {
+        "text": final_text, "confidence": confidence,
+        "source": str(result.get("source") or "corrected"),
+        "analysis": str(result.get("analysis") or "")[:300],
+    }
+    anchor["text"] = final_text
+    anchor["text_source"] = "vlm_table_judge"
+    anchor["reading_status"] = "table_vlm_selected"
+    anchor["table_reading"] = {
+        "status": "selected", "method": method, "confidence": confidence,
+        "judge_source": str(result.get("source") or "corrected"),
+        "removed_repeated_lines": removed_repeats,
+    }
+    return True
+
+
 def verify_visual_tables(image: Image.Image, page: dict[str, Any]) -> dict[str, int]:
     """후보를 검증해 기존 Region에만 `kind=table`을 기록한다."""
     checks: list[dict[str, Any]] = []
@@ -275,13 +355,17 @@ def verify_visual_tables(image: Image.Image, page: dict[str, Any]) -> dict[str, 
             "source": candidate["source"], "confidence": confidence,
             "source_regions": original,
         }
-        if uncertain_order:
+        selected_vlm = _select_visual_table_text(
+            image, anchor, grouped=len(members) > 1,
+        )
+        if uncertain_order and not selected_vlm:
             flag(anchor, "table_reading_order_uncertain")
         accepted.update(selected)
         promoted += 1
         check["accepted"] = True
         check["source_region_ids"] = selected
         check["table_region_id"] = str(anchor["region_id"])
+        check["text_status"] = anchor["table_reading"]["status"]
     page["table_checks"] = checks
     page.pop("table_areas", None)
     page["table_count"] = sum(

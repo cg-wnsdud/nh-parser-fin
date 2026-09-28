@@ -389,9 +389,13 @@ HWP 구조와 시각 Region의 내용이 일치하면 HWP 원본 셀도 뒤의 �
 PDF·이미지에서 PaddleX가 `table`로 표시했거나 페이지 VLM이 `table_areas`로 지정한
 구역은 아직 표 **후보**입니다. 영역별 텍스트 판독 뒤 페이지 이미지와 후보 확대 이미지를
 VLM에 보내 실제 표인지 확인하고, 한 심의 항목에 속한 기존 Region ID만 선택하게 합니다.
-채택된 구성원이 여러 개면 원문 문구를 읽기 순서대로 이은 한 Region으로 병합하고 bbox는
-구성원 bbox의 합집합을 씁니다. 서로 다른 상품을 합치거나 중복 컨테이너를 표로 승격하지
-않습니다. OCR 줄을 셀 격자나 임의의 의미 관계로 추정 배치하지 않습니다. 채택·거부 사유는
+채택된 구성원이 여러 개면 한 Region으로 병합하고 bbox는 구성원 bbox의 합집합을 씁니다.
+확정된 단일 표는 기존 Judge 판독을 참고 후보로 사용해 표 전체 이미지를 다시 판정하고,
+병합 표는 최종 bbox 전체를 독립적으로 판독·대조해 선택합니다.
+P1의 `text_candidates.pre_table_vlm`에는 교체 전 조립 문장을,
+`table_reading`에는 채택 방법과 신뢰도를 남깁니다. P3는 `text_source=vlm`으로 전달합니다.
+판독 실패·저신뢰 시 기존 문장을 유지하고 검수 사유를 남깁니다. 서로 다른 상품을 합치거나
+중복 컨테이너를 표로 승격하지 않습니다. 셀 격자 필드는 추정하지 않습니다. 채택·거부 사유는
 P1의 `table_checks`에, 원본 구성원은 채택 Region의 `table_detection.source_regions`에
 보존합니다. P3에서는 `kind=table`, `selected_text`, `bbox`만 봅니다.
 
@@ -837,14 +841,15 @@ tests/                         외부 서버 없이 실행하는 핵심 계약 �
 
 - 예전 자산 추출용 `ingest/hwp.py`, `ingest/assets.py`는 제거했습니다. 실제 HWP 경로는
   `ingest/hwp_structure.py`와 `ingest/hwp_render.py`입니다.
-- `ocr/reading_order.py::make_tiles()` 대신 현재는 `ocr/tiling.py::plan()`을 사용합니다.
+- 타일링·중복 제거는 `ocr/tiling.py`와 `parse/adapters.py`가 담당합니다.
+  `ocr/reading_order.py`에는 PDF 디지털 줄 정렬만 남겼습니다.
 - Paddle 요청은 `Profile.request_payload`의 `{"fileType": 1}`만 사용합니다. 표 인식
   모듈의 on/off는 클라이언트 환경변수가 아니라 Paddle 서버 YAML이 결정합니다.
 - PDF에 대한 `document-processor` 구조 추론과 독립 `table_audit.py` 실행기는 정리했습니다.
   PDF는 PDFium 텍스트/좌표와 Paddle 시각 경로를 사용하고, HWP의 `document-processor`
   구조 경로는 유지합니다.
-- `ir.py` 모델 전체가 최종 `run.py` 데이터 흐름을 강제하는 것은 아닙니다. 현재 주요 파이프라인은
-  dict 기반 조립이며, `Line` 등 일부 타입은 PDF 추출과 보조 경로에서 사용됩니다.
+- P1/P3는 `parse/export.py`에서 dict로 생성합니다. `ir.py`에는 PDF 디지털 줄과
+  글자 스타일에 실제로 쓰이는 `Line`·`TextStyle`만 남겼습니다.
 
 ## 10. 품질 경고를 해석하는 방법
 

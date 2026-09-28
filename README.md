@@ -31,7 +31,9 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
 표는 PDF·이미지의 Paddle `table` 영역과 페이지 VLM이 찾은 누락 후보를 이미지로
 재검증합니다. 한 심의 항목에 속하는 표로 확인된 경우에만 기존 Region의 `kind`를
 `table`로 설정합니다. 여러 Region으로 나뉜 표는 원본 문구와 bbox를 보존하면서 한
-Region으로 묶습니다. 실제 셀을 추정하거나 의미 관계를 새로 만들지 않습니다.
+Region으로 묶습니다. 확인된 시각 표는 전체 영역의 VLM Judge 판독을 최종 문장으로
+사용하고 P3에 `text_source=vlm`으로 표시합니다. 원문 조립본은 P1에 보존합니다.
+실제 셀을 추정하거나 의미 관계를 새로 만들지 않습니다.
 HWP 원본/HTML에서 확인된 셀은 P1의 `table.cells`에 남습니다. 후보·거부 사유는
 P1의 `table_checks`에 남고, P3는 짧은 평문과 bbox만 전달합니다.
 
@@ -43,6 +45,7 @@ P1의 `table_checks`에 남고, P3는 짧은 평문과 bbox만 전달합니다.
   "bbox": [243, 518, 1570, 708],
   "selected_text": "구분 | 금리\n기본 | 3.0%",
   "kind": "table",
+  "text_source": "vlm",
   "labels": ["금리"]
 }
 ```
@@ -64,7 +67,7 @@ P1의 `table_checks`에 남고, P3는 짧은 평문과 bbox만 전달합니다.
   ↓ 6. VLM 문서 분류 및 상품 소유권 판정
   ↓ 7. HWP 원본/HTML 셀 보존 및 구조 텍스트를 시각 Region에 정렬
   ↓ 8. 영역별 VLM 전사와 OCR 대조, 불일치 시 Judge가 최종 텍스트 선택
-  ↓ 9. Paddle·페이지 VLM 표 후보의 이미지 검증 및 Region 병합
+  ↓ 9. Paddle·페이지 VLM 표 후보의 이미지 검증, Region 병합, 표 전체 VLM Judge
   ↓ 10. 상품별 심의 템플릿 결정 및 영역별 복수 구분값 라벨링
   ↓ 11. 최종 region_id 정규화
 P1 근거 데이터 + P3 심의 입력
@@ -167,7 +170,6 @@ P3의 `pages[].regions[]`가 심의의 기본 근거입니다.
 | `kind` | `text` 또는 `table` |
 | `needs_review` | 파싱 품질상 원문 대조가 필요한지 여부 |
 | `text_source` | 최종 텍스트 출처. `hwp`, `digital`, `ocr`, `vlm` 중 하나 |
-| `table` | 표인 경우의 상태와 크기. 검증 완료 표만 반복 키 없는 `rows` 행렬 포함 |
 
 `needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 낮은 판독
 확신도 같은 **파싱 품질 신호**입니다. 구체적인 사유는 같은 `region_id`의 P1

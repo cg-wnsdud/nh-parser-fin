@@ -105,6 +105,9 @@ def _region_html(region: dict[str, Any]) -> str:
         chips.append("<span class='chip none'>라벨 없음</span>")
     if region.get("kind") == "table":
         chips.append("<span class='chip alt'>표</span>")
+        source = str(region.get("text_source") or "")
+        if source:
+            chips.append(f"<span class='chip alt'>텍스트: {html.escape(source)}</span>")
     if region.get("needs_review"):
         chips.append("<span class='chip rev'>검수</span>")
 
