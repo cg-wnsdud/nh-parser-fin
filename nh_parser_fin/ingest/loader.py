@@ -92,7 +92,7 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
     import pypdfium2 as pdfium
 
     from .canvas import native_image_dpi, render_pdf_page
-    from .triage import extract_digital_lines, triage_page
+    from .triage import triage_page
 
     pages: list[LabPage] = []
     pdf = pdfium.PdfDocument(str(path))
@@ -117,12 +117,9 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
 
         canvas = render_pdf_page(pdf_page, index + 1, dpi=int(round(dpi)))
         dpi_used = int(round(dpi))
+        # [실험: test/no-pdf-digital-text] PDF 디지털 텍스트를 쓰지 않는다.
+        # triage 판정은 렌더 DPI 결정·진단 기록용으로 그대로 계산한다.
         digital_lines: list[dict] = []
-        if verdict.verdict in ("structured", "hybrid"):
-            digital_lines = [
-                line.model_dump(mode="json")
-                for line in extract_digital_lines(pdf_page, dpi_used / 72.0)
-            ]
 
         pages.append(LabPage(
             doc_id=path.stem,
@@ -145,6 +142,7 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                 "sent_px": list(canvas.image.size),
                 "processing_route": "visual",
                 "structure_probe": {},
+                "pdf_digital_text": "disabled",
             },
         ))
     return pages

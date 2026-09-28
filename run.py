@@ -68,6 +68,9 @@ def _digital_lines(pdf, page_no: int, origin: dict, supplied: list[dict] | None 
         return list(supplied)
     if pdf is None or origin.get("triage") not in ("structured", "hybrid"):
         return []
+    if origin.get("pdf_digital_text") == "disabled":
+        # [실험: test/no-pdf-digital-text] PDF 입력은 재추출하지 않는다.
+        return []
     from nh_parser_fin.ingest.triage import extract_digital_lines
 
     px_per_pt = float(origin.get("dpi_used") or 200) / 72.0
