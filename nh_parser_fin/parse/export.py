@@ -122,6 +122,9 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
                 "needs_review": bool(region.get("needs_review")),
                 "text_source": _text_source(region),
             }
+            if region.get("visual_table"):
+                # [실험] HTML로 받은 시각 표의 병합 해제 격자. 문구는 selected_text의 마크다운.
+                item["table"] = copy.deepcopy(region["visual_table"])
             regions_out.append(item)
         pages_out.append({
             "page_no": int(page["page_no"]),

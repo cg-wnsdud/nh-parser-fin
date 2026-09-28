@@ -12,7 +12,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from ..vlm import client as vlm_client
-from . import reading
+from . import reading, table_html
 from .quality import flag
 
 
@@ -207,6 +207,49 @@ def _remove_unexplained_repeats(text: str, parser_text: str) -> tuple[str, int]:
     return "\n".join(kept).strip(), removed
 
 
+def _select_html_table_text(image: Image.Image, anchor: dict[str, Any]) -> bool:
+    """[실험] 표를 HTML로 받아 격자가 온전할 때만 마크다운 문구와 격자를 채택한다.
+
+    격자 폭이 행마다 다르거나 빈 자리가 있으면 병합 구조를 잘못 읽은 것이다. 이때는
+    기록만 남기고 False를 돌려 기존 `항목 | 값` 경로가 문구를 정하게 한다.
+    """
+    crop = reading._crop(image, anchor["bbox"])
+    if crop is None:
+        return False
+    try:
+        got = table_html.extract(crop)
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        anchor["table_html_attempt"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:200]}
+        flag(anchor, "table_html_failed")
+        return False
+    response, table = got["response"], got["table"]
+    try:
+        confidence = float(response.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    attempt = {
+        "html": str(response.get("html") or ""),
+        "confidence": confidence,
+        "rows": table["rows"], "cols": table["width"],
+        "ragged_widths": table["ragged_widths"], "holes": table["holes"],
+    }
+    if not table_html.is_valid(table) or confidence < 0.7:
+        anchor["table_html_attempt"] = {**attempt, "status": "rejected"}
+        flag(anchor, "table_html_invalid")
+        return False
+    title = str(response.get("title") or "")
+    notes = [str(value) for value in response.get("notes") or []]
+    text = table_html.compose_text(title, table_html.to_markdown(table), notes)
+    anchor.setdefault("text_candidates", {})["vlm_table_html"] = text
+    anchor["text"] = text
+    anchor["text_source"] = "vlm_table_html"
+    anchor["reading_status"] = "table_vlm_selected"
+    anchor["visual_table"] = table_html.p3_table(table, title, notes)
+    anchor["table_html_attempt"] = {**attempt, "status": "selected"}
+    anchor["table_reading"] = {"status": "selected", "method": "html_grid", "confidence": confidence}
+    return True
+
+
 def _select_visual_table_text(
     image: Image.Image, anchor: dict[str, Any], *, grouped: bool,
 ) -> bool:
@@ -214,6 +257,8 @@ def _select_visual_table_text(
     parser_text = str(anchor.get("text") or "")
     candidates = anchor.setdefault("text_candidates", {})
     candidates["pre_table_vlm"] = parser_text
+    if table_html.format_from_env() == "html" and _select_html_table_text(image, anchor):
+        return True
     # 단일 표의 기존 Judge는 전체 bbox를 보았으므로 표 전용 Judge의 참고
     # 후보로만 쓴다. 그룹 앵커의 Judge는 병합 전 한 조각만 본 것이므로 제외한다.
     prior = anchor.get("vlm_judge") or {}
