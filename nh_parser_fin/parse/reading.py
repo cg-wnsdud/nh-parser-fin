@@ -81,6 +81,26 @@ def scope_from_env() -> str:
     return value if value in SCOPES else "all"
 
 
+# [실험: 페이지 단위 Reader] `region`(기본)은 Region crop마다 1회, `page`는 페이지
+# 이미지 + Region ID·bbox·Paddle 텍스트 목록으로 한 번에 판독한다. Judge 이하는 같다.
+READER_MODES = ("region", "page")
+# 한 페이지 판독 요청이 감당할 Region 수와 참고 텍스트 길이. 넘으면 페이지 이미지는
+# 그대로 두고 Region 목록만 나눠 부른다. 응답이 잘리면 묶음 전체가 실패하기 때문이다.
+PAGE_READ_CHUNK = 20
+PAGE_READ_CHUNK_CHARS = 2400
+BOX_ISSUES = ["none", "cut_off", "mixed", "no_text"]
+
+
+def reader_mode_from_env() -> str:
+    value = str(os.environ.get("PARSER_V2_READER_MODE", "region")).strip().lower()
+    return value if value in READER_MODES else "region"
+
+
+def page_reader_text_from_env() -> bool:
+    """페이지 Reader에 Paddle 텍스트를 참고로 줄지. `off`면 ID·bbox만 준다(독립 판독)."""
+    return str(os.environ.get("PARSER_V2_PAGE_READER_TEXT", "on")).strip().lower() != "off"
+
+
 def _normalized(value: Any) -> str:
     return "".join(str(value or "").split())
 
@@ -182,6 +202,152 @@ def read_region(image: Image.Image, region: dict[str, Any]) -> dict[str, Any] | 
         "confidence": float(result.get("confidence") or 0.0),
         "analysis": str(result.get("analysis") or "")[:300],
     }
+
+
+def _page_reading_schema(region_ids: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "analysis": {"type": "string"},
+            "region_readings": {
+                "type": "array",
+                "minItems": len(region_ids),
+                "maxItems": len(region_ids),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "region_id": {"type": "string", "enum": region_ids or ["__none__"]},
+                        "box_issue": {"type": "string", "enum": BOX_ISSUES},
+                        "text": {"type": "string"},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["region_id", "box_issue", "text", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["analysis", "region_readings"],
+        "additionalProperties": False,
+    }
+
+
+def _page_chunks(regions: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    chars = 0
+    for region in regions:
+        size = len(_normalized(region.get("text")))
+        if current and (len(current) >= PAGE_READ_CHUNK or chars + size > PAGE_READ_CHUNK_CHARS):
+            chunks.append(current)
+            current, chars = [], 0
+        current.append(region)
+        chars += size
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def read_page_regions(
+    image: Image.Image, page: dict[str, Any], regions: list[dict[str, Any]],
+    errors: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """페이지 이미지 한 장으로 여러 Region을 한 번에 전사한다.
+
+    2단계(페이지 맥락)와 같은 재료 — 페이지 전체 이미지, ID 박스, Region ID·bbox·
+    Paddle 텍스트 — 를 준다. 박스 그림이 글자를 가리지 않도록 원본 페이지를 먼저,
+    ID 박스를 그린 페이지를 두 번째로 보낸다. Paddle 결과는 참고용임을 명시한다.
+    긴 페이지는 2단계와 같은 밴드로 잘라 부른다.
+    """
+    from .semantic import _overlay, _short_text, partition_for_semantic_bands
+
+    bands = partition_for_semantic_bands({**page, "regions": regions}, [])
+    if not bands:
+        bands = [{"crop": [0, 0, image.width, image.height], "regions": regions, "note": "페이지 전체"}]
+    else:
+        for band in bands:
+            band["note"] = (
+                f"긴 페이지 {band['axis']}축 band {band['index']}/{band['count']}, 원본 crop={band['crop']}"
+            )
+    output: dict[str, dict[str, Any]] = {}
+    for band in bands:
+        x0, y0, x1, y1 = band["crop"]
+        view = image.crop((x0, y0, x1, y1)).convert("RGB")
+        for chunk in _page_chunks(band["regions"]):
+            region_ids = [str(region["region_id"]) for region in chunk]
+            with_text = page_reader_text_from_env()
+            listing = "\n".join(
+                f"- {region['region_id']} bbox={region.get('bbox')} "
+                f"layout={region.get('label')}"
+                + (f" paddle_text={_short_text(region.get('text'))}" if with_text else "")
+                for region in chunk
+            )
+            reference = (
+                """박스와 paddle_text는 PaddleX 레이아웃·OCR 결과이며 **정답이 아니라 참고용**입니다.
+- 박스가 글자를 일부만 덮거나, 서로 다른 항목을 한 박스에 섞었을 수 있습니다.
+- paddle_text에는 오탈자·누락·띄어쓰기 붙음·줄 순서 뒤섞임이 있을 수 있습니다."""
+                if with_text else
+                """박스는 PaddleX 레이아웃 결과이며 **정답이 아니라 위치 참고용**입니다.
+- 박스가 글자를 일부만 덮거나, 서로 다른 항목을 한 박스에 섞었을 수 있습니다."""
+            )
+            no_copy = (
+                "- paddle_text를 그대로 베끼지 마세요. 이미지와 다르면 이미지를 따르세요.\n"
+                if with_text else ""
+            )
+            prompt = f"""당신은 금융광고 페이지 전사기입니다.
+
+첫 번째 이미지는 원본 페이지이고, 두 번째 이미지는 같은 페이지에 파란 박스와 REGION ID를
+그린 것입니다. 박스 위치는 두 번째 이미지로 확인하고, 글자는 가림이 없는 첫 번째 이미지에서
+읽으세요.
+
+{reference}
+
+아래 REGION ID {len(region_ids)}개를 **모두** region_readings에 정확히 한 번씩 넣고,
+각 박스 안에 실제로 보이는 글자를 이미지에서 직접 읽어 text에 적으세요.
+{no_copy}- 해당 박스 밖의 글자는 넣지 마세요. 줄바꿈은 보이는 대로 유지하세요.
+- 숫자·금리·날짜·괄호·각주 기호는 보이는 그대로 적고, 요약·설명·추측하지 마세요.
+- 읽을 수 없거나 글자가 없으면 text를 빈 문자열로 두세요.
+- box_issue: none(정상), cut_off(박스 경계가 글자를 자름), mixed(서로 다른 항목이
+  한 박스에 섞임), no_text(박스 안에 글자 없음).
+- analysis는 한 문장만 쓰세요.
+
+페이지 크기: {page['canvas']}
+현재 이미지 범위: {band['note']}
+{listing}
+"""
+            budget = min(
+                16000,
+                1500 + 3 * sum(len(str(r.get("text") or "")) for r in chunk) + 120 * len(chunk),
+            )
+            try:
+                result = vlm_client.chat_json(
+                    [
+                        {"type": "text", "text": prompt},
+                        vlm_client.image_part(view, box=(1400, 2400), quality=90),
+                        vlm_client.image_part(
+                            _overlay(view, chunk, [], offset=(x0, y0)), box=(1400, 2400), quality=90,
+                        ),
+                    ],
+                    schema_name="parser_v2_page_reading",
+                    schema=_page_reading_schema(region_ids),
+                    max_tokens=budget,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 한 묶음의 실패가 이미 성공한 다른 묶음의 판독을 버리지 않게 한다.
+                # 빠진 Region은 호출측이 crop Reader로 다시 읽는다.
+                if errors is not None:
+                    errors.append({"region_ids": region_ids, "error": str(exc)[:200]})
+                continue
+            known = set(region_ids)
+            for item in result.get("region_readings") or []:
+                region_id = str(item.get("region_id") or "")
+                if region_id in known and region_id not in output:
+                    output[region_id] = {
+                        "text": clean_text(item.get("text")),
+                        "confidence": float(item.get("confidence") or 0.0),
+                        "analysis": str(result.get("analysis") or "")[:300],
+                        "box_issue": str(item.get("box_issue") or "none"),
+                    }
+    return output
 
 
 def judge_region(
@@ -439,12 +605,29 @@ def read_page(
              "parser_verified": 0, "parser_preserved": 0,
              "vlm_only": 0, "vlm_blank": 0, "skipped": 0, "failed": 0,
              "judge_failed": 0}
+    mode = reader_mode_from_env()
+    page_readings: dict[str, dict[str, Any]] = {}
+    page_errors: list[dict[str, Any]] = []
+    if mode == "page":
+        targets = [region for region in page.get("regions") or [] if should_read(region, scope)]
+        page_readings = read_page_regions(image, page, targets, page_errors) if targets else {}
+        page["page_reader_errors"] = page_errors
+        stats["page_reader_missing"] = 0
     for region in page.get("regions") or []:
         if not should_read(region, scope):
             stats["skipped"] += 1
             continue
         try:
-            reading = read_region(image, region)
+            if mode == "page":
+                reading = page_readings.get(str(region["region_id"]))
+                if reading is None:
+                    # 페이지 판독에서 빠진 Region은 기존 crop Reader로 되돌린다.
+                    stats["page_reader_missing"] += 1
+                    reading = read_region(image, region)
+                    if reading is not None:
+                        reading["fallback"] = "region_crop"
+            else:
+                reading = read_region(image, region)
         except Exception as exc:  # noqa: BLE001
             # 한 영역의 판독 실패가 페이지 전체를 멈추게 하지 않는다. OCR 정본은
             # 그대로 남고 검수 대상으로만 표시된다.
@@ -467,5 +650,11 @@ def read_page(
                 region["vlm_judge"] = {"error": str(exc)[:200]}
                 stats["judge_failed"] += 1
         stats[apply_reading(region, reading, judge)] += 1
+        if mode == "page":
+            region["vlm_reading"]["mode"] = (
+                "region_fallback" if reading.get("fallback") else "page"
+            )
+            region["vlm_reading"]["box_issue"] = reading.get("box_issue")
     page["reading_stats"] = stats
+    page["reader_mode"] = mode
     return stats
