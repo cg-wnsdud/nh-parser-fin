@@ -65,6 +65,18 @@ def media_index(run: Path) -> dict[tuple[str, int], Path]:
     파일명을 만들기 때문에 여기서 복원하면 어긋난다. 이미 정확한 매핑을 가진
     `label-studio.json`을 그대로 읽는다.
     """
+    compact_index = run / "media-index.json"
+    if compact_index.exists():
+        entries = json.loads(compact_index.read_text(encoding="utf-8"))
+        index: dict[tuple[str, int], Path] = {}
+        for entry in entries:
+            name = unquote(str(entry["image_name"]))
+            path = run / "images" / name
+            if not path.exists():
+                path = MEDIA_DIR / name
+            if path.exists():
+                index[(str(entry["source_file"]), int(entry["page_no"]))] = path
+        return index
     tasks = json.loads((run / "label-studio.json").read_text(encoding="utf-8"))
     index: dict[tuple[str, int], Path] = {}
     for task in tasks:
@@ -74,32 +86,6 @@ def media_index(run: Path) -> dict[tuple[str, int], Path]:
         if path.exists():
             index[(str(data["source_file"]), int(data["page_no"]))] = path
     return index
-
-
-def _table_html(table: dict[str, Any]) -> str:
-    rows, cols = int(table["grid"]["rows"]), int(table["grid"]["cols"])
-    cells = [["" for _ in range(cols)] for _ in range(rows)]
-    header = [[False] * cols for _ in range(rows)]
-    for cell in table.get("cells") or []:
-        row, col = int(cell["row"]), int(cell["col"])
-        if 0 <= row < rows and 0 <= col < cols:
-            cells[row][col] = html.escape(str(cell.get("text") or ""))
-            header[row][col] = bool(cell.get("is_header"))
-    out = ["<table class='grid'>"]
-    for r in range(rows):
-        out.append("<tr>")
-        for c in range(cols):
-            tag = "th" if header[r][c] else "td"
-            out.append(f"<{tag}>{cells[r][c]}</{tag}>")
-        out.append("</tr>")
-    out.append("</table>")
-    notes = [str(note.get("text") or "").strip() for note in table.get("notes") or []]
-    notes = [value for value in notes if value]
-    if notes:
-        out.append("<div class='table-notes'><b>표 관련 문구</b>")
-        out.extend(f"<div>{html.escape(value)}</div>" for value in notes)
-        out.append("</div>")
-    return "".join(out)
 
 
 def _region_html(region: dict[str, Any]) -> str:
@@ -119,25 +105,65 @@ def _region_html(region: dict[str, Any]) -> str:
         chips.append("<span class='chip none'>라벨 없음</span>")
     if region.get("kind") == "table":
         chips.append("<span class='chip alt'>표</span>")
+        source = str(region.get("text_source") or "")
+        if source:
+            chips.append(f"<span class='chip alt'>텍스트: {html.escape(source)}</span>")
     if region.get("needs_review"):
         chips.append("<span class='chip rev'>검수</span>")
 
-    if region.get("table"):
-        selected = html.escape(str(region.get("selected_text") or "")).replace("\n", "<br>")
-        body = _table_html(region["table"])
-        body += (
-            "<details><summary>최종 선택 텍스트</summary>"
-            f"<div class='text'>{selected}</div></details>"
-        )
-    else:
-        text = html.escape(str(region.get("selected_text") or "")).replace("\n", "<br>")
-        body = f"<div class='text'>{text or '<i>(빈 텍스트)</i>'}</div>"
+    text = html.escape(str(region.get("selected_text") or "")).replace("\n", "<br>")
+    body = f"<div class='text'>{text or '<i>(빈 텍스트)</i>'}</div>"
 
     return (
         f"<li class='region' id='r-{html.escape(str(region['region_id']))}' "
         f"data-rid='{html.escape(str(region['region_id']))}'>"
         f"<div class='head'><span class='rid'>{html.escape(str(region['region_id']))}</span>"
         f"{''.join(chips)}</div>{body}</li>"
+    )
+
+
+def _paddle_preview_html(preview: dict[str, Any] | None) -> str:
+    if not preview:
+        return ""
+    count = int(preview.get("paddle_table_count") or 0)
+    mode = "전체 페이지" if preview.get("whole_page_input") else f"입력 방식: {preview.get('tiling') or '미상'}"
+    full = html.escape(str(preview.get("full_image") or ""))
+    crops = "".join(
+        f"<a href='paddle-tables/{html.escape(str(name))}' target='_blank'>표 후보 {index} 확대</a> "
+        for index, name in enumerate(preview.get("crops") or [], start=1)
+    )
+    return (
+        "<details class='paddle-preview'><summary>"
+        f"Paddle 표 검출: {count}개 · {html.escape(mode)}</summary>"
+        f"<a href='paddle-tables/{full}' target='_blank'>전체 크기 PNG 열기</a> {crops}"
+        f"<img src='paddle-tables/{full}' alt='Paddle 표 검출 위치'></details>"
+    )
+
+
+def _table_checks_html(page: dict[str, Any] | None) -> str:
+    if page is None:
+        return ""
+    checks = page.get("table_checks") or []
+    rows = []
+    for check in checks:
+        source = "Paddle" if check.get("source") == "paddle" else "페이지 VLM"
+        decision = "표 채택" if check.get("accepted") else "표 미채택"
+        ids = ", ".join(str(value) for value in check.get("source_region_ids") or [])
+        reason = str(check.get("reason") or "근거 없음")
+        confidence = check.get("confidence")
+        score = f" · 확신도 {float(confidence):.2f}" if isinstance(confidence, (int, float)) else ""
+        rows.append(
+            "<li>"
+            f"<strong>{html.escape(source)} · {html.escape(decision)}</strong>{html.escape(score)}"
+            f"<div>{html.escape(ids)}</div><div>{html.escape(reason)}</div>"
+            "</li>"
+        )
+    return (
+        "<details class='table-checks'><summary>표 후보 VLM 검증: "
+        f"{sum(bool(check.get('accepted')) for check in checks)}/{len(checks)}개 채택"
+        "</summary><ol>"
+        + ("".join(rows) if rows else "<li>표 검증 후보 없음</li>")
+        + "</ol></details>"
     )
 
 
@@ -168,7 +194,7 @@ def _summary_html(document: dict[str, Any], page: dict[str, Any]) -> str:
     regions = page["regions"]
     rows = [
         ("Region", len(regions)),
-        ("표", sum(1 for r in regions if r.get("table"))),
+        ("표", sum(1 for r in regions if r.get("kind") == "table")),
         ("복수 라벨", sum(1 for r in regions if len(r.get("labels") or []) > 1)),
         ("라벨 없음", sum(1 for r in regions if not r.get("labels"))),
         ("검수 필요", sum(1 for r in regions if r.get("needs_review"))),
@@ -197,8 +223,34 @@ def _summary_html(document: dict[str, Any], page: dict[str, Any]) -> str:
 
 
 def build(run: Path, title: str) -> str:
-    p3 = json.loads((run / "06-p3.json").read_text(encoding="utf-8"))
+    aggregate = run / "06-p3.json"
+    p3 = (
+        json.loads(aggregate.read_text(encoding="utf-8"))
+        if aggregate.exists()
+        else [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((run / "final").glob("*.p3.json"))
+        ]
+    )
+    aggregate_p1 = run / "05-p1.json"
+    p1 = (
+        json.loads(aggregate_p1.read_text(encoding="utf-8"))
+        if aggregate_p1.exists()
+        else [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((run / "final").glob("*.p1.json"))
+        ]
+    )
+    p1_pages = {
+        (str(document["source_file"]), int(page["page_no"])): page
+        for document in p1 for page in document.get("pages") or []
+    }
     media = media_index(run)
+    preview_path = run / "paddle-table-index.json"
+    previews = {
+        (str(item["source_file"]), int(item["page_no"])): item
+        for item in json.loads(preview_path.read_text(encoding="utf-8"))
+    } if preview_path.exists() else {}
     tabs, panes = [], []
     missing = []
 
@@ -222,6 +274,8 @@ def build(run: Path, title: str) -> str:
             panes.append(
                 f"<section class='pane' data-key='{key}'>"
                 f"{_summary_html(document, page)}"
+                f"{_paddle_preview_html(previews.get((source_file, page_no)))}"
+                f"{_table_checks_html(p1_pages.get((source_file, page_no)))}"
                 f"<div class='split'>"
                 f"<div class='left'><div class='canvas'>"
                 f"<img src='{uri}' alt='{html.escape(source_file)}'>"
@@ -253,8 +307,21 @@ body {{ margin:0; font:14px/1.6 -apple-system,"Segoe UI","Malgun Gothic",sans-se
   color:var(--ink); background:var(--bg); }}
 header {{ position:sticky; top:0; z-index:5; background:#fff;
   border-bottom:1px solid var(--line); padding:10px 16px; }}
-h1 {{ font-size:15px; margin:0 0 8px; }}
-.tabs {{ display:flex; gap:6px; flex-wrap:wrap; }}
+h1 {{ font-size:15px; margin:0; flex:none; }}
+.bar {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+/* 문서가 수십 건이면 탭 목록만으로 화면 절반을 덮는다. 기본은 접고, 지금 보고 있는
+   문서 이름을 버튼에 띄워 접힌 상태에서도 위치를 알 수 있게 한다. */
+.toggle {{ font:inherit; font-size:12px; padding:5px 10px; border:1px solid var(--line);
+  background:#fff; border-radius:6px; cursor:pointer; color:var(--ink);
+  display:flex; align-items:center; gap:8px; max-width:min(70vw, 720px); }}
+.toggle:hover {{ border-color:#9aa5b1; }}
+.toggle .who {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.toggle .count {{ color:var(--muted); flex:none; }}
+.toggle .caret {{ color:var(--muted); flex:none; transition:transform .15s; }}
+.toggle[aria-expanded="true"] .caret {{ transform:rotate(180deg); }}
+.tabs {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;
+  max-height:42vh; overflow:auto; }}
+.tabs[hidden] {{ display:none; }}
 .tab {{ font:inherit; font-size:12px; padding:5px 10px; border:1px solid var(--line);
   background:#fff; border-radius:6px; cursor:pointer; color:var(--muted); }}
 .tab:hover {{ border-color:#9aa5b1; }}
@@ -310,9 +377,16 @@ ol.regions {{ list-style:none; margin:0; padding:0; }}
 .span b {{ font-size:12px; color:#2E7D32; }}
 .span i {{ font-size:12px; color:var(--muted); }}
 .note {{ font-size:11px; color:var(--muted); margin-top:4px; }}
-table.grid {{ border-collapse:collapse; font-size:12px; width:100%; }}
-table.grid th, table.grid td {{ border:1px solid var(--line); padding:3px 6px; }}
-table.grid th {{ background:#eef1f4; }}
+.paddle-preview {{ background:#fff; border:1px solid var(--line); border-radius:6px;
+  padding:7px 10px; margin-bottom:10px; }}
+.paddle-preview summary {{ cursor:pointer; font-weight:600; }}
+.paddle-preview a {{ margin-right:10px; font-size:12px; }}
+.paddle-preview img {{ display:block; max-width:100%; max-height:70vh; margin-top:8px; }}
+.table-checks {{ background:#fff; border:1px solid var(--line); border-radius:6px;
+  padding:8px 12px; margin:8px 0; }}
+.table-checks summary {{ cursor:pointer; font-weight:600; }}
+.table-checks ol {{ margin:8px 0 0; padding-left:24px; }}
+.table-checks li {{ padding:4px 0; border-top:1px solid var(--line); }}
 .warn {{ color:#B71C1C; font-size:12px; margin-top:4px; }}
 .warn.top {{ padding:8px 16px; background:#FFEBEE; }}
 h3 {{ font-size:12px; color:var(--muted); margin:14px 0 4px; }}
@@ -323,17 +397,42 @@ ul.orphans {{ margin:0; padding-left:18px; }}
   .left {{ position:static; }}
 }}
 </style></head><body>
-<header><h1>{title}</h1><div class="tabs">{tabs}</div></header>
+<header>
+<div class="bar"><h1>{title}</h1>
+<button type="button" id="toggle" class="toggle" aria-expanded="false" aria-controls="tabs">
+<span class="who" id="current">문서 선택</span>
+<span class="count" id="count"></span><span class="caret">&#9662;</span></button></div>
+<div class="tabs" id="tabs" hidden>{tabs}</div></header>
 {warn}
 {panes}
 <script>
 const tabs = [...document.querySelectorAll('.tab')];
 const panes = [...document.querySelectorAll('.pane')];
+const tabsBox = document.getElementById('tabs');
+const toggle = document.getElementById('toggle');
+const current = document.getElementById('current');
+document.getElementById('count').textContent = tabs.length + '개';
+
+function setOpen(open) {{
+  tabsBox.hidden = !open;
+  toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+}}
 function show(key) {{
   tabs.forEach(t => t.classList.toggle('on', t.dataset.key === key));
   panes.forEach(p => p.classList.toggle('on', p.dataset.key === key));
+  const active = tabs.find(t => t.dataset.key === key);
+  if (active) current.textContent = active.textContent.trim();
 }}
-tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.key)));
+// 탭을 고르면 목록은 닫는다 — 고르자마자 내용이 보여야 한다.
+tabs.forEach(t => t.addEventListener('click', () => {{ show(t.dataset.key); setOpen(false); }}));
+toggle.addEventListener('click', () => {{
+  const opening = tabsBox.hidden;
+  setOpen(opening);
+  if (opening) tabsBox.querySelector('.tab.on')?.scrollIntoView({{block: 'nearest'}});
+}});
+document.addEventListener('keydown', e => {{ if (e.key === 'Escape') setOpen(false); }});
+// 문서가 몇 건뿐이면 접을 이유가 없다.
+setOpen(tabs.length <= 12);
 if (tabs.length) show(tabs[0].dataset.key);
 
 // 박스와 오른쪽 항목을 양방향으로 연결한다. 어느 쪽을 봐도 짝을 찾을 수 있어야 한다.
@@ -372,6 +471,7 @@ function link(root) {{
       }}
     }});
   }});
+
 }}
 panes.forEach(link);
 </script></body></html>
@@ -386,8 +486,8 @@ def main() -> None:
     args = parser.parse_args()
 
     run = OUTPUT_ROOT / args.run_name
-    if not (run / "06-p3.json").exists():
-        raise SystemExit(f"06-p3.json 이 없습니다: {run}")
+    if not (run / "06-p3.json").exists() and not list((run / "final").glob("*.p3.json")):
+        raise SystemExit(f"P3 JSON이 없습니다: {run}")
     out = args.out or (run / "report.html")
     out.write_text(
         build(run, args.title or f"NH 광고물 파싱 — {args.run_name}"), encoding="utf-8",

@@ -6,8 +6,8 @@ import re
 from typing import Any
 
 
-P1_VERSION = "nh-ad-parse-evidence-v3"
-P3_VERSION = "nh-ad-region-review-input-v6"
+P1_VERSION = "nh-ad-parse-evidence-v4"
+P3_VERSION = "nh-ad-region-review-input-v9"
 
 
 def build_p1(document: dict[str, Any]) -> dict[str, Any]:
@@ -34,47 +34,6 @@ def build_p1(document: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     return evidence
-
-
-def _compact_table(
-    table: dict[str, Any] | None, status: str | None,
-) -> dict[str, Any] | None:
-    """검증된 표만 반복 키 없는 행렬로 줄여 P3에 싣는다.
-
-    VLM 셀 배치가 부분적이면 추정 구조를 노출하지 않는다. P3의 selected_text가
-    원문을 보존하고, 셀·bbox·line_ref·미배치 사유는 P1에서 조회한다.
-    """
-    if not table:
-        return None
-    grid = table.get("grid") or {}
-    rows = max(0, int(grid.get("rows") or 0))
-    cols = max(0, int(grid.get("cols") or 0))
-    compact: dict[str, Any] = {
-        "status": "complete" if status == "complete" else "partial",
-        "shape": [rows, cols],
-    }
-    if status != "complete" or not rows or not cols:
-        return compact
-
-    matrix: list[list[str | None]] = [[None for _ in range(cols)] for _ in range(rows)]
-    header_rows: set[int] = set()
-    for cell in table.get("cells") or []:
-        row, col = int(cell.get("row") or 0), int(cell.get("col") or 0)
-        if not (0 <= row < rows and 0 <= col < cols):
-            continue
-        value = str(cell.get("text") or "").strip()
-        matrix[row][col] = value or None
-        if cell.get("is_header"):
-            header_rows.add(row)
-    compact["header_rows"] = sorted(header_rows)
-    compact["rows"] = matrix
-    notes = [
-        str(note.get("text") or "").strip() for note in table.get("notes") or []
-        if str(note.get("text") or "").strip()
-    ]
-    if notes:
-        compact["notes"] = notes
-    return compact
 
 
 def _review_units(evidence: dict[str, Any], kept_ids: set[str]) -> list[dict[str, Any]]:
@@ -111,7 +70,17 @@ def _text_source(region: dict[str, Any]) -> str:
     세부는 같은 ``region_id`` 로 P1 에서 조회한다.
     """
     source = str(region.get("text_source") or "")
-    return "vlm" if source.startswith("vlm") else "ocr"
+    if source.startswith("vlm"):
+        return "vlm"
+    if source.startswith("digital"):
+        return "digital"
+    if source.startswith("hwp_structure"):
+        return "hwp"
+    if source.startswith("document_processor_html"):
+        return "hwp"
+    if source.startswith("document_processor"):
+        return "digital"
+    return "ocr"
 
 
 def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -149,13 +118,10 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
                 "bbox": bbox,
                 "selected_text": text,
                 "labels": labels,
-                "kind": "table" if region.get("table") else "text",
+                "kind": "table" if region.get("kind") == "table" or region.get("table") else "text",
                 "needs_review": bool(region.get("needs_review")),
                 "text_source": _text_source(region),
             }
-            table = _compact_table(region.get("table"), region.get("table_status"))
-            if table:
-                item["table"] = table
             regions_out.append(item)
         pages_out.append({
             "page_no": int(page["page_no"]),
@@ -170,8 +136,15 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             "source_evidence_version": P1_VERSION,
             "review_unit": "region",
             "text_policy": "one evidence-verified final text per region; all candidates stay in P1",
+            "text_source_values": ["hwp", "digital", "ocr", "vlm"],
             "region_id_policy": "page-scoped pN_rNNN in final page order",
             "reference_policy": "P1 and P3 share region_id; review results return region_ids",
+            "table_policy": (
+                "verified visual tables and source-structure tables use kind=table; "
+                "visual tables use the final whole-table VLM Judge text when available; "
+                "source-structure tables retain their source text; "
+                "cell evidence, parser candidates, and verification stay in P1"
+            ),
         },
         "document": {
             key: copy.deepcopy(evidence.get(key))

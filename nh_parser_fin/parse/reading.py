@@ -1,30 +1,20 @@
-"""영역 판독 — VLM이 Region을 독립적으로 읽고 OCR 결과와 대조한다.
+"""VLM이 Region 이미지를 읽고 OCR/PDF 문장과 대조한다.
 
-OCR 은 디자인 문구·스타일 글자에서 무너진다. 실측(2026-09-20, 9개 파일):
-
-    2. 카드상품 p1_r005   `※상환능력에비해신용카드사용액이과도할경우,귀하의개인신용평점이그을V`
-    3. 예금성(거치식) p1_r019  `이아융이HN이ㄷ`
-    2. 대출성상품 p1_r025  `)`
-
-그런데 깨진 채로 라벨링에 가면 엉뚱한 구분값이 붙는다 — `p1_r025` 는 `)` 한 글자로
-`상품명` 라벨을 받았다. 그래서 라벨링 **앞에서** 판독을 끝낸다.
-
-페이지 전체를 훑어 "빠진 문구"를 찾는 방식은 쓰지 않는다. 같은 9개 파일에서 0건
-나왔다 — 모델이 목록에 없는 것을 스스로 대조하지 못한다. 영역마다 물어야 한다.
-
-Reader가 이미지에서 독립 전사한 뒤 OCR/PDF 후보와 비교한다. 둘이 다르면 두 후보와
-같은 crop을 Judge에게 다시 주고, Judge의 최종 전사를 Region 정본으로 채택한다.
-OCR/PDF 원문과 Reader 결과는 P1 후보에 그대로 남겨 되짚을 수 있게 한다.
+일반 Region의 디지털 원문은 우선 보존한다. 시각 표로 확인된 Region은
+``visual_tables``가 최종 bbox 전체를 표 전용 Judge로 다시 판독한다.
+원문과 모델 판독 후보는 P1에 남겨 비교할 수 있다.
 """
 from __future__ import annotations
 
 import os
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
 from PIL import Image
 
 from ..vlm import client as vlm_client
+from .adapters import DIGITAL_PRIMARY_SHARE, digital_line_share
 from .quality import flag
 
 # 공백을 지우고 비교하므로 띄어쓰기·줄바꿈만 다른 경우는 1.000 이 나온다.
@@ -95,6 +85,12 @@ def _normalized(value: Any) -> str:
     return "".join(str(value or "").split())
 
 
+def _semantic_alnum(value: Any) -> str:
+    """PUA/기호/공백을 빼고 실제 문자와 숫자만 비교한다."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return "".join(char for char in normalized if char.isalnum()).casefold()
+
+
 def agreement(left: str, right: str) -> float:
     a, b = _normalized(left), _normalized(right)
     if not a and not b:
@@ -107,12 +103,20 @@ def agreement(left: str, right: str) -> float:
 def should_read(region: dict[str, Any], scope: str) -> bool:
     """이 Region 을 VLM 에 보낼지 정한다.
 
-    표 Region 은 제외한다. 셀 배치 단계에서 이미 같은 crop 을 VLM 이 봤고,
-    격자를 평문으로 다시 읽으면 무조건 불일치로 나온다.
+    HWP 원본 구조 표는 독립 전사 대상에서 제외한다. PDF·이미지 시각 표는
+    이 단계 뒤에 확정되므로 일반 Region처럼 먼저 읽고, 확인되면 표 전용 Judge를 거친다.
     """
     if scope == "off" or not region.get("bbox"):
         return False
     if region.get("kind") == "table" or region.get("table"):
+        return False
+    # document-processor가 HWP/PDF 내부 구조에서 직접 읽은 텍스트는 이미지 전사가
+    # 보완할 대상이 아니다. VLM Reader가 행 일부만 읽어 정본을 줄이는 일을 막고,
+    # 이미지 전용 신규 블록은 기존대로 Reader를 거친다.
+    if (
+        str(region.get("text_source") or "").startswith("document_processor")
+        and _normalized(region.get("text"))
+    ):
         return False
     if scope == "all":
         return True
@@ -227,6 +231,67 @@ def judge_region(
     }
 
 
+def read_visual_table(
+    image: Image.Image, region: dict[str, Any], parser_text: str,
+    reader_text: str | None = None,
+) -> dict[str, Any] | None:
+    """확정된 표의 bbox 전체를 이미지로 보며 항목-값 대응을 재판정한다."""
+    crop = _crop(image, region["bbox"])
+    if crop is None:
+        return None
+    reader_text = clean_text(reader_text)
+    candidate_b_source = "기존 영역 VLM Judge" if reader_text else "표 이미지 독립 판독"
+    if not reader_text:
+        prompt = """첨부 이미지는 금융 문서에서 확인된 표 하나의 전체 영역입니다.
+이미지에 보이는 글자를 빠짐없이 읽어 text에 적으세요.
+각 행의 항목과 대응하는 값은 같은 줄에 `항목 | 값`으로 적고, 행은 줄바꿈으로 구분하세요.
+여러 표가 나란히 있으면 각각의 제목과 항목-값 대응을 유지하세요.
+표에 없는 행·숫자·단위·제목을 만들거나 반복하지 마세요.
+셀 좌표나 JSON 표 구조는 만들지 말고, 읽을 수 없는 곳은 추측하지 마세요.
+analysis에는 판독의 한계가 있으면 간단히 적으세요.
+"""
+        budget = min(8500, 1800 + 4 * len(parser_text))
+        reader = vlm_client.chat_json(
+            [{"type": "text", "text": prompt},
+             vlm_client.image_part(crop, box=(2400, 1800), quality=94)],
+            schema_name="parser_v2_visual_table_reading", schema=_SCHEMA,
+            max_tokens=budget,
+        )
+        reader_text = clean_text(reader.get("text"))
+        reader_confidence = float(reader.get("confidence") or 0.0)
+    else:
+        reader_confidence = None
+    if not _normalized(reader_text):
+        return None
+    judge_prompt = f"""첨부 이미지는 같은 표의 전체 영역입니다. 두 후보를 이미지와 대조해
+최종 text를 작성하세요. 후보 A에는 OCR과 PDF 텍스트가 겹쳐 같은 숫자나 표제가
+두 번 들어갈 수 있습니다. 실제 이미지에 한 번만 보이면 한 번만 적으세요.
+각 행의 항목과 그 값을 같은 줄에 `항목 | 값`으로 연결하고 행마다 줄바꿈하세요.
+여러 표가 나란히 있으면 각각의 제목과 대응 관계를 유지하세요.
+숫자·단위·각주를 만들거나 생략하지 마세요. 확신할 수 없는 글자를 추측하지 마세요.
+source는 A가 맞으면 parser, B가 맞으면 reader, 둘을 고쳤으면 corrected입니다.
+analysis는 판정 이유 한 문장, text에는 최종 판독만 적으세요.
+
+후보 A (OCR/PDF 조립):\n{parser_text}
+
+후보 B ({candidate_b_source}):\n{reader_text}
+"""
+    result = vlm_client.chat_json(
+        [{"type": "text", "text": judge_prompt},
+         vlm_client.image_part(crop, box=(2400, 1800), quality=94)],
+        schema_name="parser_v2_visual_table_reading_judge", schema=_JUDGE_SCHEMA,
+        max_tokens=min(9500, 2000 + 4 * max(len(parser_text), len(reader_text))),
+    )
+    return {
+        "text": clean_text(result.get("text")),
+        "confidence": float(result.get("confidence") or 0.0),
+        "source": str(result.get("source") or "corrected"),
+        "analysis": str(result.get("analysis") or "")[:300],
+        "reader_text": reader_text,
+        "reader_confidence": reader_confidence,
+    }
+
+
 def clean_text(value: Any) -> str:
     """모델이 JSON 을 닫고 이어 쓴 잡담을 잘라낸다.
 
@@ -242,13 +307,22 @@ def clean_text(value: Any) -> str:
 
 
 def _has_digital_evidence(region: dict[str, Any]) -> bool:
-    """PDF 내장 텍스트처럼 글자와 좌표를 직접 얻은 Region인지 확인한다."""
-    if str(region.get("text_source") or "").startswith("digital_"):
+    """Region의 정본이 실제로 PDF 디지털 텍스트에 주로 의존하는지 확인한다."""
+    source = str(region.get("text_source") or "")
+    if source.startswith("document_processor"):
         return True
-    return any(
-        str(line.get("source") or "").casefold() == "digital"
-        for line in region.get("lines") or []
-    )
+    # HWP 구조와 교차 확인된 원문은 줄 출처 비율과 무관하게 보존한다.
+    if (
+        (region.get("hwp_structure_validation") or {}).get("status") == "agrees"
+        or (region.get("hwp_structure_corroboration") or {}).get("status") == "agrees"
+    ):
+        return True
+    lines = region.get("lines") or []
+    share = digital_line_share(lines)
+    if share is not None:
+        return share >= DIGITAL_PRIMARY_SHARE
+    # 줄 증거가 없는 기존 Region에는 출처 표기를 그대로 적용한다.
+    return source.startswith("digital_")
 
 
 def _store_judge(region: dict[str, Any], judge: dict[str, Any] | None) -> str:
@@ -298,6 +372,31 @@ def apply_reading(
     if ocr_text and _has_digital_evidence(region):
         if _normalized(ocr_text) == _normalized(final_text):
             region["reading_status"] = "parser_verified"
+            return "parser_verified"
+        structure_validation = region.get("hwp_structure_validation") or {}
+        structure_corroboration = region.get("hwp_structure_corroboration") or {}
+        if (
+            structure_validation.get("status") == "agrees"
+            or structure_corroboration.get("status") == "agrees"
+        ):
+            # 체크박스 같은 HWP 글리프는 PDF와 구조 파서가 서로 다른 PUA 문자로
+            # 내보내기도 한다. 구조와 VLM의 한글·영숫자 내용이 완전히 같을 때만
+            # VLM이 본 표준 Unicode 기호를 채택한다.
+            if (
+                any(unicodedata.category(char) == "Co" for char in ocr_text)
+                and not any(
+                    unicodedata.category(char) == "Co" for char in final_text
+                )
+                and _semantic_alnum(final_text)
+                == _semantic_alnum(
+                    (region.get("text_candidates") or {}).get("hwp_structure")
+                )
+            ):
+                region["text"] = final_text
+                region["text_source"] = "vlm_structure_verified"
+                region["reading_status"] = "vlm_glyph_verified_by_hwp_structure"
+                return "parser_verified"
+            region["reading_status"] = "parser_verified_by_hwp_structure"
             return "parser_verified"
         flag(region, "digital_text_vlm_disagreement")
         region["reading_status"] = "parser_preserved"

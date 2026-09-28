@@ -25,8 +25,6 @@ PRODUCT_IDS = ["page_common", "product_1", "product_2", "product_3", "product_4"
 ACTIONS = ["new_region", "attach_context", "page_common", "decorative", "needs_review"]
 PRODUCT_GROUPS = ["예금성", "대출성", "카드", "투자성", "판단불가"]
 NAME_SHOWN = ["노출", "미노출", "판단불가"]
-# 표처럼 보이는 영역의 두 갈래. `table` 만 하나로 합친다.
-TABLE_KINDS = ["table", "field_list"]
 ABSTAIN = "해당없음"
 
 # 한 라벨링 요청이 감당할 Region 수. 넘으면 나눠 부른다. 목록이 길어지면 뒤쪽
@@ -48,6 +46,8 @@ LABEL_ALIASES = {
     "이자지급시기": ("이자지급시기", "이자지급방식", "이자지급방법", "이자지급주기"),
     "이자지급제한": ("이자지급제한",),
     "예상수취이자": ("예상수취이자", "예상이자"),
+    "예금자보호": ("예금자보호법", "예금자보호", "예금보호"),
+    "유의사항": ("유의사항",),
     "대출대상": ("대출대상",),
     "대출한도": ("대출한도",),
     "대출기간": ("대출기간",),
@@ -102,8 +102,11 @@ LABEL_NEGATIVE_EXAMPLES = {
     "금리": "대출금리 또는 금리 변동 가능성만 경고하는 유의사항",
     "우대금리": "우대금리가 변경될 수 있다는 경고만 있는 문장",
     "대출대상": "대출자격이 변경될 수 있다는 유의사항",
-    "대출한도": "대출한도가 신용도에 따라 달라질 수 있다는 유의사항",
+    "대출한도": "대출한도가 달라질 수 있다는 유의사항 또는 금리 산정 예시의 가정 대출금액",
+    "대출기간": "대출금리 산정 예시에서 금리 계산 전제로만 제시한 기간",
     "대출금리": "대출금리가 변경될 수 있다는 유의사항",
+    "상환방법": "대출금리 산정 예시에서 금리 계산 전제로만 언급한 상환방식",
+    "채권보전": "대출금리 산정 예시에서 금리 계산 전제로만 언급한 담보·보증",
     "상품명": "일반 명사나 다른 상품을 비교 목적으로 언급한 문구",
     "유의사항": "가입대상·금액·기간·금리 값을 항목별로 제시한 조건표",
 }
@@ -185,11 +188,16 @@ def explicit_heading_evidence(text: Any, allowed: list[str]) -> dict[str, str]:
         line = raw_line.strip()
         if not line:
             continue
-        candidate = re.sub(r"^[※*ㆍ·•\-–—\s]+", "", line).strip()
+        candidate = re.sub(r"^[※*ㆍ·•▶▷▪■□◾§\-–—\s]+", "", line).strip()
         for canonical, aliases in LABEL_ALIASES.items():
             if canonical not in allowed or canonical in found:
                 continue
             for alias in sorted(aliases, key=len, reverse=True):
+                if canonical == "예금자보호" and re.match(
+                    rf"^{re.escape(alias)}(?:에\s*따라|\s*[:：]|\s+|$)", candidate,
+                ):
+                    found[canonical] = line
+                    break
                 match = re.match(
                     rf"^{re.escape(alias)}(?:\s*[:：]|\s+|$)", candidate,
                 )
@@ -239,6 +247,20 @@ def constrain_title_labels(region: dict[str, Any], labels: list[str]) -> list[st
         if "상품명" in labels:
             return ["상품명"]
     return labels
+
+
+def constrain_rate_calculation_labels(region: dict[str, Any], labels: list[str]) -> list[str]:
+    """금리 산정 예시의 가정값이 기간·한도·상환조건으로 번지는 것을 막는다."""
+    text = "".join(str(region.get("text") or "").split()).casefold()
+    markers = sum(value in text for value in ("기준금리", "가산금리", "우대금리"))
+    is_rate_example = markers >= 2 and ("적용시" in text or "기준," in text)
+    if not is_rate_example or "대출금리" not in labels:
+        return labels
+    headings = explicit_heading_evidence(region.get("text"), labels)
+    return [
+        label for label in labels
+        if label == "대출금리" or label in headings
+    ]
 
 
 # ── 1단계 · 소유권 ──────────────────────────────────────────────────
@@ -327,19 +349,16 @@ def _ownership_schema(region_ids: list[str], candidate_ids: list[str]) -> dict[s
                         # 겹쳤다. 목록에 있는 ID 를 고르게 하면 추정이 사라진다.
                         "member_ids": {
                             "type": "array",
-                            "minItems": 2,
+                            "minItems": 1,
                             "items": {
                                 "type": "string",
                                 "enum": (region_ids + candidate_ids) or ["__none__"],
                             },
                         },
-                        # 시각적으로는 둘 다 격자라 기하학으로 구분할 수 없다.
-                        # 합칠지 말지는 의미 판정이므로 여기서 받는다.
-                        "kind": {"type": "string", "enum": TABLE_KINDS},
                         "note": {"type": "string"},
                         "confidence": {"type": "number"},
                     },
-                    "required": ["member_ids", "kind", "note", "confidence"],
+                    "required": ["member_ids", "note", "confidence"],
                     "additionalProperties": False,
                 },
             },
@@ -412,21 +431,15 @@ def analyze_page_ownership(
    - page_common: 회사명·심의번호 등 공통 영역
    - decorative: 심의 텍스트로 쓰지 않는 순수 장식
    - needs_review: 확정 불가
-4. table_areas: 행과 열로 나란히 놓인 영역이 있으면, 거기에 속한 **REGION/CANDIDATE
-   ID를 member_ids에 모두** 적으세요. 좌표는 쓰지 않습니다.
-   PaddleX가 표로 잡지 못한 영역도 보이는 대로 적고, kind를 반드시 구분하세요.
-   - table: 머리글이 있고 칸 전체가 **하나의 항목**을 설명하는 진짜 표.
-     예) `구분 | 적립율` 머리글 아래 값이 들어찬 표
-   - field_list: 왼쪽이 항목명, 오른쪽이 그 값인 **서로 다른 항목의 나열**.
-     예) `대출대상 | …`, `대출한도 | …`, `대출기간 | …` 이 세로로 이어지는 블록
-    둘을 헷갈리면 서로 다른 항목이 한 덩어리로 묶여 항목별 구분이 사라집니다.
-   같은 높이에 있어도 서로 다른 상품 패널에 속한 조각은 절대 같은 table_areas로
-   묶지 마세요. 표 하나가 여러 작은 ID로 쪼개졌다면 그 ID를 빠짐없이 고르세요.
+4. table_areas: PaddleX가 표로 표시하지 못했지만 **하나의 심의 항목에 속하는 표**가
+   보이면 그 REGION/CANDIDATE ID를 member_ids에 적으세요. 좌표는 쓰지 않습니다.
+   `대출대상 | 값`, `대출한도 | 값`, `대출기간 | 값`처럼 서로 다른 심의 항목의
+   나열은 하나의 표 후보로 묶지 마세요. 다른 상품 패널의 조각도 섞지 마세요.
 5. missing_visible_text: 이미지에는 분명히 보이지만 REGION/CANDIDATE 목록에 전혀 없는 문구만 적으세요.
 
 중요 규칙:
 - analysis는 세 문장 이내로 쓰세요. 길면 응답이 잘립니다.
-- bbox를 새로 만들지 말고 제공된 ID만 선택하세요(table_areas의 근사 위치는 예외).
+- bbox를 새로 만들지 말고 제공된 ID만 선택하세요.
 - 다른 상품의 내용을 같은 product_id에 섞지 마세요.
 - 표·고지·상품 설명이라는 PaddleX layout 이름은 힌트일 뿐 정답으로 믿지 마세요.
 - 원문에 없는 문구를 추측하지 마세요.
@@ -552,6 +565,9 @@ def analyze_page_context(
         for area in result.get("table_areas") or []:
             box = [float(value) for value in area.get("approx_bbox_pct") or []]
             if len(box) != 4:
+                # 현재 페이지 판정 스키마는 member_ids만 요구한다. 좌표가
+                # 없다는 이유로 긴 페이지의 표 후보를 통째로 버리면 안 된다.
+                combined["table_areas"].append(copy.deepcopy(area))
                 continue
             combined["table_areas"].append({
                 **area,
@@ -747,6 +763,9 @@ def analyze_product_labels(
   항목을 가져오면 안 됩니다.
 - 유의사항 문장에 `대출한도`, `대출금리`라는 단어가 언급되더라도 그 문장이 해당
   항목의 실제 값을 설명하는 것이 아니면 그 라벨을 붙이지 마세요.
+- 기준금리·가산금리·우대금리로 최종 대출금리를 설명하는 산정 예시 안의 대출금액,
+  대출기간, 상환방식, 신용등급, 담보는 계산 전제입니다. 별도 표제어가 없는 한 해당
+  Region에는 `대출금리`만 붙이고 전제 항목의 라벨은 붙이지 마세요.
 - 짧은 상품 제목 Region에는 상품명 외의 페이지 구분값을 붙이지 마세요.
 
 페이지 크기: {page['canvas']}

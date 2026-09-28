@@ -1,5 +1,5 @@
 """영역 판독 — VLM Reader/Judge가 최종 텍스트를 선택하는 규칙을 검증한다."""
-from nh_parser_fin.parse import reading
+from nh_parser_fin.parse import adapters, export, reading
 
 
 def test_matching_reading_verifies_but_keeps_digital_parser_text():
@@ -79,6 +79,40 @@ def test_digital_parser_text_wins_when_judge_disagrees():
     assert region["vlm_judge"]["source"] == "reader"
 
 
+def test_hwp_corroboration_prevents_a_vlm_typo_review():
+    region = {
+        "bbox": [0, 0, 10, 10], "text": "최저 연 3.08% ~ 최고 5.78%",
+        "text_source": "digital_ocr_lines",
+        "hwp_structure_corroboration": {"status": "agrees", "source_ids": ["t1/r1c1"]},
+    }
+
+    status = reading.apply_reading(
+        region, {"text": "최저 연 3.08% ~ 최고 5.76%", "confidence": 0.9},
+    )
+
+    assert status == "parser_verified"
+    assert region.get("needs_review") is not True
+
+
+def test_hwp_structure_allows_vlm_to_replace_only_private_use_glyphs():
+    region = {
+        "bbox": [0, 0, 100, 30],
+        "text": "\uf000지수연동예금(E LD) 안내",
+        "text_source": "digital_ocr_lines",
+        "text_candidates": {"hwp_structure": "\uf3da 지수연동예금(ELD) 안내"},
+        "hwp_structure_validation": {"status": "agrees"},
+    }
+
+    status = reading.apply_reading(
+        region, {"text": "☐ 지수연동예금(ELD) 안내", "confidence": 1.0},
+    )
+
+    assert status == "parser_verified"
+    assert region["text"] == "☐ 지수연동예금(ELD) 안내"
+    assert region["text_source"] == "vlm_structure_verified"
+    assert region.get("needs_review") is not True
+
+
 def test_judge_can_correct_non_digital_ocr_text():
     region = {"bbox": [0, 0, 10, 10], "text": "기본금리 연 2.2S%",
               "text_source": "paddlex_block_content",
@@ -94,13 +128,79 @@ def test_judge_can_correct_non_digital_ocr_text():
     assert region["text_source"] == "vlm_judge"
 
 
+def test_ocr_dominant_pdf_region_selects_judge_despite_one_digital_line():
+    """광고 이미지의 버튼 한 줄 때문에 OCR 본문 전체를 PDF 원문으로 취급하지 않는다."""
+    page = adapters.build_page_evidence(
+        [{"bbox": [0, 0, 200, 100], "label": "image", "order": 1,
+          "content": "특판 적금"}],
+        [
+            {"bbox": [10, 10, 190, 25], "text": "re-뱅킹 예금 출시 25주년"},
+            {"bbox": [10, 30, 190, 45], "text": "최고 7.1%"},
+            {"bbox": [10, 50, 190, 65], "text": "NH대박 7적금"},
+        ],
+        page_no=1, canvas=[200, 100],
+        digital_lines=[{"bbox": [130, 75, 190, 90], "text": "상품가입"}],
+    )
+    region = page["regions"][0]
+    assert region["text_source"] == "ocr_digital_lines"
+    assert region["digital_text_share"] < adapters.DIGITAL_PRIMARY_SHARE
+
+    corrected = "「e-뱅킹 예금」 출시 25주년\n최고 7.1%\nNH대박 7(칠)적금\n상품가입"
+    status = reading.apply_reading(
+        region,
+        {"text": corrected, "confidence": 0.95},
+        {"text": corrected, "confidence": 1.0, "source": "corrected"},
+    )
+    assert status == "judge_selected"
+    assert region["text_source"] == "vlm_judge"
+    assert region["text_candidates"]["parser_selected"] != corrected
+    assert export.build_p3({"pages": [page]})["pages"][0]["regions"][0]["selected_text"] == corrected
+
+
+def test_digital_dominant_region_still_preserves_pdf_text():
+    region = {
+        "bbox": [0, 0, 100, 50],
+        "text": "기본금리 연 2.25%\n가입",
+        "text_source": "digital_ocr_lines",
+        "lines": [
+            {"text": "기본금리 연 2.25%", "source": "digital"},
+            {"text": "가입", "source": "ocr"},
+        ],
+    }
+    status = reading.apply_reading(
+        region,
+        {"text": "기본금리 연 2.26%\n가입", "confidence": 0.9},
+        {"text": "기본금리 연 2.26%\n가입", "confidence": 0.98},
+    )
+    assert status == "parser_preserved"
+    assert region["text"] == "기본금리 연 2.25%\n가입"
+
+
 def test_table_regions_are_never_re_read():
-    """셀 배치 단계에서 같은 crop 을 이미 봤다. 평문으로 다시 읽으면 무조건 불일치다."""
+    """원본 셀로 확정된 표는 Reader가 평문으로 덮어쓰지 않는다."""
     table = {"bbox": [0, 0, 10, 10], "kind": "table", "text": "| 가 | 나 |",
              "table": {"grid": {"rows": 1, "cols": 2}}}
 
     assert reading.should_read(table, "all") is False
     assert reading.should_read(table, "targeted") is False
+
+
+def test_document_structure_text_is_never_re_read_or_replaced():
+    region = {
+        "bbox": [0, 0, 100, 30],
+        "text": "준비서류\n실명확인증표\n재직확인서류",
+        "text_source": "document_processor_html",
+        "bbox_quality": "display_exact",
+    }
+
+    assert reading.should_read(region, "all") is False
+    status = reading.apply_reading(
+        region,
+        {"text": "준비서류", "confidence": 0.99},
+    )
+    assert status == "parser_preserved"
+    assert region["text"] == "준비서류\n실명확인증표\n재직확인서류"
+    assert region["text_source"] == "document_processor_html"
 
 
 def test_targeted_scope_picks_only_suspicious_regions():

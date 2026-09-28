@@ -114,7 +114,7 @@ def test_p3_keeps_one_region_with_plain_label_list_and_no_indexes():
     p3 = export_v2.build_p3(p1)
 
     output = p3["pages"][0]["regions"][0]
-    assert p3["contract"]["version"] == "nh-ad-region-review-input-v6"
+    assert p3["contract"]["version"] == "nh-ad-region-review-input-v9"
     assert output["region_id"] == "p1_r001"
     assert output["selected_text"] == region["text"]
     assert output["labels"] == ["가입대상", "가입금액"]
@@ -159,6 +159,15 @@ def test_terms_mentioned_inside_a_warning_are_not_explicit_headings():
     ) == {}
 
 
+def test_deposit_protection_and_notice_headings_are_deterministic():
+    evidence = semantic.explicit_heading_evidence(
+        "▶ 유의사항\n※ 예금자보호법에 따라 원금과 이자를 보호합니다.",
+        ["유의사항", "예금자보호"],
+    )
+
+    assert list(evidence) == ["유의사항", "예금자보호"]
+
+
 def test_short_product_title_cannot_inherit_page_labels():
     region = {
         "text": "NH올원e통장",
@@ -168,3 +177,32 @@ def test_short_product_title_cannot_inherit_page_labels():
     assert semantic.constrain_title_labels(
         region, ["상품명", "가입대상", "금리", "유의사항"],
     ) == ["상품명"]
+
+
+def test_rate_calculation_assumptions_do_not_become_product_term_labels():
+    region = {
+        "text": (
+            "(2026.08.04. 현재 기준금리 3.25%, 가산금리 2.76%, "
+            "대출기간 2년, 산출금액 2억원, 만기일시상환, "
+            "우대금리 2.70%p 적용 시)"
+        ),
+    }
+
+    assert semantic.constrain_rate_calculation_labels(
+        region,
+        ["대출기간", "대출한도", "대출금리", "상환방법", "우대금리"],
+    ) == ["대출금리"]
+
+
+def test_explicit_heading_survives_rate_calculation_constraint():
+    region = {
+        "text": (
+            "대출금리 최저 연 3.31%\n"
+            "대출기간 2년\n"
+            "(기준금리 3.25%, 가산금리 2.76%, 우대금리 2.70%p 적용 시)"
+        ),
+    }
+
+    assert semantic.constrain_rate_calculation_labels(
+        region, ["대출기간", "대출금리"],
+    ) == ["대출기간", "대출금리"]

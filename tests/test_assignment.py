@@ -85,6 +85,32 @@ def test_digital_pdf_text_is_preferred_but_paddlex_candidate_is_retained():
     assert [line["source"] for line in region["lines"]] == ["digital"]
 
 
+def test_document_structure_text_is_not_replaced_by_partial_digital_lines():
+    """렌더링 PDF 줄은 HWP 구조 파서의 완전한 행 텍스트를 줄이면 안 된다."""
+    page = adapters.build_page_evidence(
+        [{
+            "bbox": [0, 0, 300, 120],
+            "label": "text",
+            "order": 1,
+            "content": "준비서류\n실명확인증표\n재직확인서류\n소득확인서류",
+            "text_source": "document_processor_html",
+            "bbox_quality": "display_exact",
+        }],
+        [],
+        page_no=1,
+        canvas=[300, 120],
+        digital_lines=[
+            {"bbox": [5, 5, 100, 25], "text": "준비서류"},
+            {"bbox": [5, 90, 140, 110], "text": "소득확인서류"},
+        ],
+    )
+    region = page["regions"][0]
+    assert region["text"] == "준비서류\n실명확인증표\n재직확인서류\n소득확인서류"
+    assert region["text_source"] == "document_processor_html"
+    assert region["text_selection_status"] == "structured_primary"
+    assert region["text_candidates"]["line_assembled"] == "준비서류\n소득확인서류"
+
+
 def test_nested_regions_give_ocr_line_to_smaller_region_once():
     page = adapters.build_page_evidence(
         [

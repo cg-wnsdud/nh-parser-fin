@@ -20,6 +20,7 @@ from typing import Any
 MIN_REGION_OVERLAP = 0.5
 STRONG_AGREEMENT = 0.8
 VLM_CONFLICT = 0.5
+DIGITAL_PRIMARY_SHARE = 0.5
 
 
 def _area(bbox: list[int]) -> int:
@@ -38,6 +39,33 @@ def line_overlap_ratio(line_bbox: list[int], region_bbox: list[int]) -> float:
 
 def _normalized(text: str | None) -> str:
     return re.sub(r"\s+", "", text or "").casefold()
+
+
+def digital_line_share(lines: list[dict[str, Any]]) -> float | None:
+    """Region의 실제 줄 텍스트 중 PDF 디지털 출처의 글자 비율."""
+    lengths = [
+        (str(line.get("source") or "").casefold(), len(_normalized(line.get("text"))))
+        for line in lines
+    ]
+    total = sum(length for source, length in lengths if source in {"digital", "ocr"})
+    if not total:
+        return None
+    return sum(length for source, length in lengths if source == "digital") / total
+
+
+def digital_text_needs_ocr(
+    digital_lines: list[dict[str, Any]], ocr_lines: list[dict[str, Any]],
+) -> bool:
+    """문자 매핑이 깨졌거나 본문 대부분이 빠진 한국어 PDF 텍스트층을 감지한다.
+
+    OCR 자체가 충분한 한글을 읽었을 때만 비교하여, 정상적인 짧은 페이지나
+    영문 페이지의 디지털 원문을 함부로 버리지 않는다.
+    """
+    if not digital_lines:
+        return False
+    digital_hangul = sum(len(re.findall(r"[가-힣]", str(line.get("text") or ""))) for line in digital_lines)
+    ocr_hangul = sum(len(re.findall(r"[가-힣]", str(line.get("text") or ""))) for line in ocr_lines)
+    return ocr_hangul >= 100 and digital_hangul < ocr_hangul * 0.2
 
 
 def _reading_key(line: dict[str, Any]) -> tuple[int, int]:
@@ -87,6 +115,9 @@ def build_page_evidence(
     조립한 결과가 ``block_content``를 무조건 덮지는 않는다. 둘의 일치도를 기록하고,
     충돌하면 후속 VLM/Judge 대상임을 명시한다.
     """
+    digital_quality_fallback = digital_text_needs_ocr(digital_lines or [], ocr_lines)
+    if digital_quality_fallback:
+        digital_lines = []
     ordered = sorted(
         enumerate(parsing),
         key=lambda pair: (
@@ -102,7 +133,8 @@ def build_page_evidence(
     regions: list[dict[str, Any]] = []
     for sequence, (_, block) in enumerate(ordered, start=1):
         content = str(block.get("content") or "").strip()
-        regions.append({
+        block_text_source = str(block.get("text_source") or "paddlex_block_content")
+        region = {
             "region_id": f"p{page_no}_r{sequence:03d}",
             "page_no": page_no,
             "sequence": sequence,
@@ -116,7 +148,8 @@ def build_page_evidence(
             "product_id": None,
             "ownership_status": "pending",
             "text": content,
-            "text_source": "paddlex_block_content" if content else "pending_line_fallback",
+            "text_source": block_text_source if content else "pending_line_fallback",
+            "block_text_source": block_text_source,
             "text_candidates": {
                 "paddlex_block_content": content or None,
                 "line_assembled": None,
@@ -129,7 +162,13 @@ def build_page_evidence(
             "content_gap_candidates": [],
             "parent_id": None,
             "child_ids": [],
-        })
+        }
+        # 디지털 구조 파서가 이미 준 표/출처/정확도는 뒤 단계에서 다시 추론하지 않도록
+        # Region에 그대로 전달한다. PaddleX 블록에는 이 필드가 없어 기존 동작과 같다.
+        for key in ("kind", "table", "bbox_source", "bbox_quality", "structured"):
+            if key in block:
+                region[key] = block[key]
+        regions.append(region)
 
     unassigned: list[dict[str, Any]] = []
 
@@ -194,6 +233,12 @@ def build_page_evidence(
         region["ocr_evidence"] = ocr_evidence
         region["digital_evidence"] = digital_evidence
         region["lines"] = owned_lines
+        digital_share = digital_line_share(owned_lines)
+        region["digital_text_share"] = (
+            round(digital_share, 4) if digital_share is not None else None
+        )
+        has_digital = any(line.get("source") == "digital" for line in owned_lines)
+        digital_primary = digital_share is not None and digital_share >= DIGITAL_PRIMARY_SHARE
         line_text = "\n".join(
                 str(line.get("text") or "").strip()
                 for line in owned_lines
@@ -204,6 +249,9 @@ def build_page_evidence(
         if block_text and line_text:
             agreement = SequenceMatcher(None, _normalized(block_text), _normalized(line_text)).ratio()
             region["text_agreement"] = round(agreement, 4)
+            structured_primary = str(region.get("block_text_source") or "").startswith(
+                "document_processor"
+            )
             # 디지털 텍스트는 OCR보다 문자 정확도가 높아 기존 파이프라인도 정본으로 썼다.
             #
             # 디지털 줄이 없을 때 무조건 `block_content` 를 쓰면 안 된다. PNG 입력은
@@ -218,16 +266,30 @@ def build_page_evidence(
                 if len(_normalized(line.get("text"))) >= 2
                 and _normalized(line.get("text")) not in _normalized(block_text)
             ]
-            if any(line.get("source") == "digital" for line in owned_lines):
+            # HWP/PDF 구조 파서가 문단·표 행 단위로 준 텍스트는 전량 원문 정본이다.
+            # 렌더링 PDF의 디지털 줄은 bbox를 교차 검증하는 보조 증거일 뿐이다. 줄의
+            # 읽기 순서가 깨지거나 일부만 영역 안에 들어왔다는 이유로 구조 텍스트를
+            # 덮으면 HWP 표의 항목 목록이 유실된다.
+            if structured_primary:
+                region["text"] = block_text
+                region["text_source"] = region.get("block_text_source")
+            elif digital_primary:
                 region["text"] = line_text
                 region["text_source"] = "digital_ocr_lines"
+            elif has_digital:
+                region["text"] = line_text
+                region["text_source"] = "ocr_digital_lines"
             elif missing:
                 region["text"] = line_text
                 region["text_source"] = "ocr_lines_block_incomplete"
             else:
                 region["text"] = block_text
                 region["text_source"] = "paddlex_block_content"
-            if agreement >= STRONG_AGREEMENT:
+            if structured_primary:
+                region["text_selection_status"] = (
+                    "sources_agree" if agreement >= STRONG_AGREEMENT else "structured_primary"
+                )
+            elif agreement >= STRONG_AGREEMENT:
                 region["text_selection_status"] = "sources_agree"
             elif agreement >= VLM_CONFLICT:
                 # 어순·공백·줄 합치기 차이가 대부분이다. 기록은 하되 별도 VLM 호출은 하지 않는다.
@@ -237,12 +299,14 @@ def build_page_evidence(
                 conflict_regions += 1
         elif block_text:
             region["text"] = block_text
-            region["text_source"] = "paddlex_block_content"
+            region["text_source"] = region.get("block_text_source") or "paddlex_block_content"
             region["text_selection_status"] = "paddlex_only"
         elif line_text:
             region["text"] = line_text
-            has_digital = any(line.get("source") == "digital" for line in owned_lines)
-            region["text_source"] = "digital_ocr_fallback" if has_digital else "ocr_fallback"
+            region["text_source"] = (
+                "digital_ocr_fallback" if digital_primary else
+                "ocr_digital_fallback" if has_digital else "ocr_fallback"
+            )
             region["text_selection_status"] = "line_fallback"
             fallback_regions += int(bool(region["text"]))
         else:
@@ -286,6 +350,10 @@ def build_page_evidence(
             "empty_regions": sum(r["text_source"] == "empty" for r in regions),
             "ocr_lines": len(ocr_lines),
             "digital_lines": len(digital_lines or []),
+            "digital_text_route": (
+                "ocr_fallback" if digital_quality_fallback
+                else "digital_primary" if digital_lines else "ocr_only"
+            ),
             "canonical_lines": len(canonical_stream),
             "unassigned_lines": len(unassigned),
             "content_gap_candidates": gap_candidates,

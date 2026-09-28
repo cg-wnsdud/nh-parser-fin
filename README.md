@@ -8,7 +8,7 @@
 
 파이프라인은 문서마다 두 결과를 만듭니다.
 
-- **P1 근거 데이터**: OCR/PDF/VLM이 본 내용, 후보 텍스트, 좌표 출처, 품질 경고를 보존합니다.
+- **P1 근거 데이터**: OCR/PDF/HWP 구조/VLM이 본 내용, 후보 텍스트, 좌표 출처, 품질 경고를 보존합니다.
 - **P3 심의 입력**: 심의 단계에 필요한 최종 영역만 간결하게 전달합니다.
 
 P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은 페이지별
@@ -28,46 +28,36 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
 }
 ```
 
-표는 `kind: "table"`로 구분합니다. P1에는 셀 좌표와 근거(`table.grid`, `table.cells`,
-`table.notes`)를 보관합니다. P3와 리포트에는 검증을 통과한 표만 `shape`, `header_rows`,
-`rows` 행렬로 표시합니다. 셀 배치가 불완전한 표는 `status: "partial"`과 크기만 전달하며,
-화면에서는 빈 격자 대신 경고와 `selected_text` 원문을 보여 줍니다. 심의 결과가 `region_ids`를
-돌려주면 화면에서 P3의 `bbox`를 사용해 해당 위치를 표시할 수 있습니다.
+표는 PDF·이미지의 Paddle `table` 영역과 페이지 VLM이 찾은 누락 후보를 이미지로
+재검증합니다. 한 심의 항목에 속하는 표로 확인된 경우에만 기존 Region의 `kind`를
+`table`로 설정합니다. 여러 Region으로 나뉜 표는 원본 문구와 bbox를 보존하면서 한
+Region으로 묶습니다. 확인된 시각 표는 전체 영역의 VLM Judge 판독을 최종 문장으로
+사용하고 P3에 `text_source=vlm`으로 표시합니다. 원문 조립본은 P1에 보존합니다.
+실제 셀을 추정하거나 의미 관계를 새로 만들지 않습니다.
+HWP 원본/HTML에서 확인된 셀은 P1의 `table.cells`에 남습니다. 후보·거부 사유는
+P1의 `table_checks`에 남고, P3는 짧은 평문과 bbox만 전달합니다.
 
-예를 들어 2행 2열 금리 표는 P3에서 다음처럼 나옵니다. 리포트는 `header_rows`의 0번 행을
-헤더로 그려 `구분 | 금리` / `기본 | 3.0%` 격자로 보여 줍니다.
+예를 들어 시각적으로 검증된 금리 표는 P3에서 다음처럼 나옵니다.
 
 ```json
 {
   "region_id": "p1_r020",
   "bbox": [243, 518, 1570, 708],
-  "selected_text": "구분\n금리\n기본\n3.0%",
+  "selected_text": "구분 | 금리\n기본 | 3.0%",
   "kind": "table",
-  "table": {
-    "status": "complete",
-    "shape": [2, 2],
-    "header_rows": [0],
-    "rows": [["구분", "금리"], ["기본", "3.0%"]]
-  }
+  "text_source": "vlm",
+  "labels": ["금리"]
 }
 ```
 
-| 구분 | 금리 |
-|---|---|
-| 기본 | 3.0% |
-
-반대로 셀을 모두 검증하지 못했으면 P3에는 아래처럼 행렬을 넣지 않습니다. 리포트도 표 대신
-`표 구조 미검증 (partial, 2×2)` 안내와 `selected_text`를 표시합니다.
-
-```json
-"table": {"status": "partial", "shape": [2, 2]}
-```
+심의 결과가 `region_ids`를 돌려주면 P3의 `bbox`로 해당 위치를 표시할 수 있습니다.
 
 ## 전체 처리 흐름
 
 ```text
 입력 파일
   ↓ 1. 페이지 렌더 및 PDF 텍스트 추출
+       └ HWP/HWPX는 document-processor 우선/Kordoc 폴백 구조 추출 + 로컬 PDF 렌더
 페이지 이미지 + 디지털 텍스트 줄
   ↓ 2. 일반 페이지는 통째로, 세로로 긴 페이지는 글자 밀도 경계로 타일 분할
   ↓ 3. spark-1118 PP-StructureV3 호출
@@ -75,10 +65,11 @@ P1과 P3의 같은 영역은 `region_id`로 연결됩니다. 최종 ID 형식은
   ↓ 4. 타일 좌표를 페이지 좌표로 복원하고 경계 중복 제거
   ↓ 5. OCR/PDF 줄을 영역에 한 번만 귀속하고 미배정 줄을 복구 후보로 보존
   ↓ 6. VLM 문서 분류 및 상품 소유권 판정
-  ↓ 7. 표 구조 복원
+  ↓ 7. HWP 원본/HTML 셀 보존 및 구조 텍스트를 시각 Region에 정렬
   ↓ 8. 영역별 VLM 전사와 OCR 대조, 불일치 시 Judge가 최종 텍스트 선택
-  ↓ 9. 상품별 심의 템플릿 결정 및 영역별 복수 구분값 라벨링
-  ↓ 10. 최종 region_id 정규화
+  ↓ 9. Paddle·페이지 VLM 표 후보의 이미지 검증, Region 병합, 표 전체 VLM Judge
+  ↓ 10. 상품별 심의 템플릿 결정 및 영역별 복수 구분값 라벨링
+  ↓ 11. 최종 region_id 정규화
 P1 근거 데이터 + P3 심의 입력
 ```
 
@@ -86,6 +77,8 @@ P1 근거 데이터 + P3 심의 입력
 좌표는 PaddleX 레이아웃 또는 OCR/PDF 텍스트 줄에서만 만들며 VLM이 좌표를 새로 생성하지 않습니다.
 
 세부 단계와 VLM 호출 위치는 [docs/PIPELINE.md](docs/PIPELINE.md)를 참고하세요.
+처음 저장소를 인수받는 개발자를 위한 전체 입출력·단계별 근거·운영 주의사항은
+[docs/HANDOVER.md](docs/HANDOVER.md)에 정리되어 있습니다.
 
 ## 외부 서비스와 환경변수
 
@@ -110,6 +103,9 @@ cp .env.example .env
 | `PARSER_V2_ASPECT_LIMIT` | 통짜/타일 분할 기준 종횡비 |
 | `PARSER_V2_TILE_SPAN` | 타일 목표 길이(px) |
 | `PARSER_V2_ENCODE` | PaddleX 전송 이미지 형식(`jpeg` 또는 `png`) |
+| `KORDOC_COMMAND`, `KORDOC_VERSION`, `KORDOC_TIMEOUT` | HWP 구조 파서 명령·버전·제한 시간(개발 브랜치) |
+| `HWP_RENDER_BACKEND` | HWP 렌더 선택: `auto`(HTML→LibreOffice), `html`, `libreoffice` |
+| `HWP_RENDER_TIMEOUT`, `HWP_RENDER_DIR` | HWP→PDF 제한 시간과 선택적 중간 PDF 보존 위치 |
 | `NH_OUTPUT_ROOT` | 실행 결과 저장 위치(선택) |
 | `NH_MEDIA_DIR` | 렌더한 페이지 이미지 저장 위치(선택) |
 | `VLM_CACHE`, `VLM_CACHE_DIR` | VLM 응답 캐시 정책과 위치(선택) |
@@ -135,16 +131,16 @@ python -m pip install -e .
 python -m pip install pytest
 ```
 
-PaddleX까지만 실행해 영역 조립을 확인하려면:
+전체 파이프라인을 실행하려면(페이지 조립 뒤 VLM 판정과 P1/P3 생성까지 항상 수행):
 
 ```bash
-uv run python run.py --run-name ocr-check --input "samples/sample.pdf"
+uv run python run.py --run-name full-check --input "samples/sample.pdf"
 ```
 
-VLM 후처리와 P1/P3까지 실행하려면:
+PaddleX를 재호출하지 않고 저장된 박스로 Region 조립만 다시 확인하려면:
 
 ```bash
-uv run python run.py --run-name full-check --with-vlm --input "samples/sample.pdf"
+uv run python replay.py --from full-check --run-name replay-check
 ```
 
 `--input`에는 파일 또는 폴더를 여러 개 줄 수 있습니다. 기본 `--sizing asis`는 이미지의
@@ -169,14 +165,13 @@ P3의 `pages[].regions[]`가 심의의 기본 근거입니다.
 | `region_id` | P1 재조회와 화면 하이라이트에 쓰는 `pN_rNNN` ID |
 | `product_id` | 여러 상품이 한 페이지에 있을 때의 상품 소유권 |
 | `bbox` | 렌더된 페이지 픽셀 좌표 `[x1, y1, x2, y2]` |
-| `selected_text` | OCR/PDF와 VLM 판독을 거쳐 선택된 최종 텍스트 |
+| `selected_text` | OCR/PDF/HWP 구조와 VLM 판독을 거쳐 선택된 최종 텍스트 |
 | `labels` | 해당 영역의 템플릿 구분값 목록. 복수 허용 |
 | `kind` | `text` 또는 `table` |
 | `needs_review` | 파싱 품질상 원문 대조가 필요한지 여부 |
-| `text_source` | 최종 텍스트가 `ocr` 계열인지 `vlm`인지 |
-| `table` | 표인 경우의 상태와 크기. 검증 완료 표만 반복 키 없는 `rows` 행렬 포함 |
+| `text_source` | 최종 텍스트 출처. `hwp`, `digital`, `ocr`, `vlm` 중 하나 |
 
-`needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 표 셀 미배치, 낮은 판독
+`needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 낮은 판독
 확신도 같은 **파싱 품질 신호**입니다. 구체적인 사유는 같은 `region_id`의 P1
 `review_reasons`에서 확인합니다. 실제 심의 결과는 `위반`, `판정불가`, `충족`과 그 근거
 `region_ids`를 별도로 반환합니다.
@@ -196,10 +191,15 @@ nh_parser_fin/
   vlm/                    fc87 Gemma 호출과 응답 캐시
 tests/                    외부 서버 없이 실행하는 단위 테스트
 docs/PIPELINE.md           단계별 데이터 흐름과 설계 근거
+docs/HWP_INPUT.md          개발 중 HWP 렌더·구조 결합 경로와 실행 환경
 ```
 
-HWP/HWPX 입력은 사내 `document-processor` 패키지가 추가로 필요합니다. 이 패키지가 없어도
-PDF와 이미지 경로는 동작하며, HWP를 읽을 때만 명시적인 import 오류가 발생합니다.
+HWP/HWPX 입력 로직은 현재 `feat/hwp-input-render` 브랜치에서 구현·검증 중이며 아직
+`main`에 병합되지 않았습니다. 이 브랜치에서는 document-processor 구조 파싱과
+HTML/Chromium 렌더를 우선 사용하고, 구조 파싱에는 Kordoc, 렌더에는 LibreOffice를
+각각 폴백으로 사용합니다. 렌더 페이지는 기존 PDF/PaddleX 경로로 bbox를 만듭니다.
+설치형 한컴오피스는 호출하지 않습니다. 이 환경이 없어도 PDF와 이미지 경로는 동작합니다.
+세부 흐름과 제약은 [docs/HWP_INPUT.md](docs/HWP_INPUT.md)를 참고하세요.
 
 ## 검증
 
