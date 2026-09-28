@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
+from collections import Counter
 from html.parser import HTMLParser
 from typing import Any
 
@@ -185,9 +187,30 @@ def compose_text(title: str, markdown: str, notes: list[str]) -> str:
     return "\n".join(parts)
 
 
-def extract(crop: Image.Image) -> dict[str, Any]:
+def _alnum(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return "".join(char for char in normalized if char.isalnum()).casefold()
+
+
+# 표로 묶이기 전 Region 문구의 글자가 HTML 결과(표·제목·각주)에 이 비율 이상 있어야 한다.
+# 기존 문구에는 OCR 잡음이 섞여 있어 1.0을 요구하지 않는다. 실측: 카드 GS 표에서 큰
+# 제목 한 줄(약 22자)이 빠졌을 때 약 0.77이었다.
+MIN_COVERAGE = 0.85
+
+
+def coverage(source_text: str, output_text: str) -> float:
+    """source의 글자·숫자가 output에 얼마나 들어 있는지(문자 다중집합 기준)."""
+    source, output = _alnum(source_text), _alnum(output_text)
+    if not source:
+        return 1.0
+    shared = sum((Counter(source) & Counter(output)).values())
+    return shared / len(source)
+
+
+def extract(crop: Image.Image, feedback: str = "") -> dict[str, Any]:
+    prompt = PROMPT + (f"\n{feedback}\n" if feedback else "")
     response = vlm_client.chat_json(
-        [{"type": "text", "text": PROMPT},
+        [{"type": "text", "text": prompt},
          vlm_client.image_part(crop, box=(2400, 1800), quality=94)],
         schema_name="parser_v2_visual_table_html", schema=SCHEMA, max_tokens=9000,
     )

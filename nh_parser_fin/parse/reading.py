@@ -96,6 +96,26 @@ def reader_mode_from_env() -> str:
     return value if value in READER_MODES else "region"
 
 
+def judge_trigger_from_env() -> str:
+    value = str(os.environ.get("PARSER_V2_JUDGE_TRIGGER", "ratio")).strip().lower()
+    return value if value in ("ratio", "strict") else "ratio"
+
+
+def needs_judge(parser_text: str, reader_text: str) -> bool:
+    """Reader와 파서 문구가 달라 crop Judge가 필요한지.
+
+    `ratio`(기본)는 공백 제거 일치도 0.95 미만일 때만 부른다. 긴 문장에서 한 글자만
+    틀리면(`여신`→`연신`, `채움`→`채춤`) 0.95를 넘어 Judge 없이 통과한다.
+    `strict`는 공백·기호를 뺀 글자·숫자가 한 자라도 다르면 부른다. 띄어쓰기·줄바꿈·
+    글머리 기호 차이만으로는 부르지 않는다.
+    """
+    if agreement(parser_text, reader_text) < AGREE:
+        return True
+    if judge_trigger_from_env() == "strict":
+        return _semantic_alnum(parser_text) != _semantic_alnum(reader_text)
+    return False
+
+
 def page_reader_text_from_env() -> bool:
     """페이지 Reader에 Paddle 텍스트를 참고로 줄지. `off`면 ID·bbox만 준다(독립 판독)."""
     return str(os.environ.get("PARSER_V2_PAGE_READER_TEXT", "on")).strip().lower() != "off"
@@ -643,7 +663,9 @@ def read_page(
         parser_text = str(region.get("text") or "")
         reader_text = str(reading.get("text") or "")
         judge = None
-        if _normalized(reader_text) and agreement(parser_text, reader_text) < AGREE:
+        if _normalized(reader_text) and needs_judge(parser_text, reader_text):
+            if agreement(parser_text, reader_text) >= AGREE:
+                stats["strict_judge"] = stats.get("strict_judge", 0) + 1
             try:
                 judge = judge_region(image, region, reading)
             except Exception as exc:  # noqa: BLE001

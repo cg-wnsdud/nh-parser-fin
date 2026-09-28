@@ -216,37 +216,60 @@ def _select_html_table_text(image: Image.Image, anchor: dict[str, Any]) -> bool:
     crop = reading._crop(image, anchor["bbox"])
     if crop is None:
         return False
-    try:
-        got = table_html.extract(crop)
-    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
-        anchor["table_html_attempt"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:200]}
-        flag(anchor, "table_html_failed")
-        return False
-    response, table = got["response"], got["table"]
-    try:
-        confidence = float(response.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    attempt = {
-        "html": str(response.get("html") or ""),
-        "confidence": confidence,
-        "rows": table["rows"], "cols": table["width"],
-        "ragged_widths": table["ragged_widths"], "holes": table["holes"],
-    }
-    if not table_html.is_valid(table) or confidence < 0.7:
-        anchor["table_html_attempt"] = {**attempt, "status": "rejected"}
+    source_text = str(anchor.get("text") or "")
+    attempts: list[dict[str, Any]] = []
+    feedback = ""
+    chosen = None
+    # 같은 표도 호출마다 병합 구조를 다르게 읽는다. 무효면 사유를 알려 한 번 더 묻는다.
+    for _ in range(2):
+        try:
+            got = table_html.extract(crop, feedback=feedback)
+        except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+            attempts.append({"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:200]})
+            feedback = ""
+            continue
+        response, table = got["response"], got["table"]
+        title = str(response.get("title") or "")
+        notes = [str(value) for value in response.get("notes") or []]
+        text = table_html.compose_text(title, table_html.to_markdown(table), notes)
+        coverage = table_html.coverage(source_text, text)
+        attempt = {
+            "html": str(response.get("html") or ""),
+            # 모델이 0~1 범위를 지키지 않는다(실측 5.0). 기록만 하고 판단에 쓰지 않는다.
+            "confidence": response.get("confidence"),
+            "rows": table["rows"], "cols": table["width"],
+            "ragged_widths": table["ragged_widths"], "holes": table["holes"],
+            "coverage": round(coverage, 4),
+        }
+        if not table_html.is_valid(table):
+            attempts.append({**attempt, "status": "rejected", "reason": "grid"})
+            feedback = ("직전 응답은 행마다 칸 수(colspan 포함)가 달라 무효였습니다. "
+                        "rowspan/colspan을 다시 확인해 모든 행의 칸 수를 맞추세요.")
+            continue
+        if coverage < table_html.MIN_COVERAGE:
+            attempts.append({**attempt, "status": "rejected", "reason": "coverage"})
+            feedback = ("직전 응답은 이미지 안의 문구 일부가 빠져 무효였습니다. 표 위 제목·"
+                        "표 밖 문구도 이미지에 있으면 title 또는 notes에 모두 옮기세요.")
+            continue
+        attempts.append({**attempt, "status": "selected"})
+        chosen = (table, title, notes, text)
+        break
+    anchor["table_html_attempts"] = attempts
+    anchor["table_html_attempt"] = attempts[-1] if attempts else {"status": "failed"}
+    if chosen is None:
         flag(anchor, "table_html_invalid")
         return False
-    title = str(response.get("title") or "")
-    notes = [str(value) for value in response.get("notes") or []]
-    text = table_html.compose_text(title, table_html.to_markdown(table), notes)
+    table, title, notes, text = chosen
+    confidence = attempts[-1].get("confidence")
     anchor.setdefault("text_candidates", {})["vlm_table_html"] = text
     anchor["text"] = text
     anchor["text_source"] = "vlm_table_html"
     anchor["reading_status"] = "table_vlm_selected"
     anchor["visual_table"] = table_html.p3_table(table, title, notes)
-    anchor["table_html_attempt"] = {**attempt, "status": "selected"}
-    anchor["table_reading"] = {"status": "selected", "method": "html_grid", "confidence": confidence}
+    anchor["table_reading"] = {
+        "status": "selected", "method": "html_grid", "confidence": confidence,
+        "attempts": len(attempts),
+    }
     return True
 
 
