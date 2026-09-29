@@ -21,7 +21,6 @@ from nh_parser_fin.ingest.loader import iter_inputs, load_pages
 from nh_parser_fin.ocr import paddlex as client
 from nh_parser_fin.ocr import tiling, view
 from nh_parser_fin.parse.adapters import build_page_evidence, dedupe_ocr_lines, digital_text_needs_ocr
-from nh_parser_fin.parse.digital_anchor import mode_from_env as digital_mode_from_env
 
 
 def _write_json(path: Path, value) -> None:
@@ -311,8 +310,11 @@ def main() -> None:
             if not args.compact_output:
                 _write_json(out / "boxes" / f"{key}.json", boxes_record)
             # [실험] anchor 모드: 디지털 줄은 정본 조립에 넣지 않고 글자 교정 재료로만 넘긴다.
+            # PDF 입력에만 적용한다. HWP를 렌더한 PDF의 텍스트층은 문서 원본 글자라
+            # main처럼 정본으로 둔다 — 빼면 OCR 문구가 HWP 구조 검증을 통과해 `□`·`▶`·
+            # 띄어쓰기가 빠진 채 보존된다(실측: `12. 예금성상품-입출식 광고7 (1).hwp`).
             anchor_lines: list[dict] = []
-            if digital_mode_from_env() == "anchor" and digital:
+            if page.origin.get("pdf_digital_text") == "anchor" and digital:
                 anchor_lines, digital = digital, []
                 if digital_text_needs_ocr(anchor_lines, lines):
                     # 글자 매핑이 깨진 텍스트층은 main과 같은 기준으로 버린다.
