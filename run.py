@@ -20,7 +20,8 @@ from nh_parser_fin.config import MEDIA_DIR, OUTPUT_ROOT, Profile
 from nh_parser_fin.ingest.loader import iter_inputs, load_pages
 from nh_parser_fin.ocr import paddlex as client
 from nh_parser_fin.ocr import tiling, view
-from nh_parser_fin.parse.adapters import build_page_evidence, dedupe_ocr_lines
+from nh_parser_fin.parse.adapters import build_page_evidence, dedupe_ocr_lines, digital_text_needs_ocr
+from nh_parser_fin.parse.digital_anchor import mode_from_env as digital_mode_from_env
 
 
 def _write_json(path: Path, value) -> None:
@@ -309,6 +310,13 @@ def main() -> None:
             }
             if not args.compact_output:
                 _write_json(out / "boxes" / f"{key}.json", boxes_record)
+            # [실험] anchor 모드: 디지털 줄은 정본 조립에 넣지 않고 글자 교정 재료로만 넘긴다.
+            anchor_lines: list[dict] = []
+            if digital_mode_from_env() == "anchor" and digital:
+                anchor_lines, digital = digital, []
+                if digital_text_needs_ocr(anchor_lines, lines):
+                    # 글자 매핑이 깨진 텍스트층은 main과 같은 기준으로 버린다.
+                    anchor_lines = []
             evidence = build_page_evidence(
                 parsing,
                 lines,
@@ -316,6 +324,10 @@ def main() -> None:
                 canvas=list(page.image.size),
                 digital_lines=digital,
             )
+            if anchor_lines:
+                evidence["digital_anchor_lines"] = [
+                    {"text": line.get("text"), "bbox": line.get("bbox")} for line in anchor_lines
+                ]
             evidence.update({
                 "source_file": page.source_file,
                 "origin": page.origin,
