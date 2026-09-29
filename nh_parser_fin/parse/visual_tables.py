@@ -12,7 +12,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from ..vlm import client as vlm_client
-from . import reading
+from . import reading, table_html
 from .quality import flag
 
 
@@ -207,6 +207,72 @@ def _remove_unexplained_repeats(text: str, parser_text: str) -> tuple[str, int]:
     return "\n".join(kept).strip(), removed
 
 
+def _select_html_table_text(image: Image.Image, anchor: dict[str, Any]) -> bool:
+    """표를 HTML로 받아 격자가 온전할 때만 마크다운 문구와 격자를 채택한다(TABLE_FORMAT=html).
+
+    격자 폭이 행마다 다르거나 빈 자리가 있으면 병합 구조를 잘못 읽은 것이다. 이때는
+    기록만 남기고 False를 돌려 기존 `항목 | 값` 경로가 문구를 정하게 한다.
+    """
+    crop = reading._crop(image, anchor["bbox"])
+    if crop is None:
+        return False
+    source_text = str(anchor.get("text") or "")
+    attempts: list[dict[str, Any]] = []
+    feedback = ""
+    chosen = None
+    # 같은 표도 호출마다 병합 구조를 다르게 읽는다. 무효면 사유를 알려 한 번 더 묻는다.
+    for _ in range(2):
+        try:
+            got = table_html.extract(crop, feedback=feedback)
+        except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+            attempts.append({"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:200]})
+            feedback = ""
+            continue
+        response, table = got["response"], got["table"]
+        title = str(response.get("title") or "")
+        notes = [str(value) for value in response.get("notes") or []]
+        text = table_html.compose_text(title, table_html.to_markdown(table), notes)
+        coverage = table_html.coverage(source_text, text)
+        attempt = {
+            "html": str(response.get("html") or ""),
+            # 모델이 0~1 범위를 지키지 않는다(실측 5.0). 기록만 하고 판단에 쓰지 않는다.
+            "confidence": response.get("confidence"),
+            "rows": table["rows"], "cols": table["width"],
+            "ragged_widths": table["ragged_widths"], "holes": table["holes"],
+            "coverage": round(coverage, 4),
+        }
+        if not table_html.is_valid(table):
+            attempts.append({**attempt, "status": "rejected", "reason": "grid"})
+            feedback = ("직전 응답은 행마다 칸 수(colspan 포함)가 달라 무효였습니다. "
+                        "rowspan/colspan을 다시 확인해 모든 행의 칸 수를 맞추세요.")
+            continue
+        if coverage < table_html.MIN_COVERAGE:
+            attempts.append({**attempt, "status": "rejected", "reason": "coverage"})
+            feedback = ("직전 응답은 이미지 안의 문구 일부가 빠져 무효였습니다. 표 위 제목·"
+                        "표 밖 문구도 이미지에 있으면 title 또는 notes에 모두 옮기세요.")
+            continue
+        attempts.append({**attempt, "status": "selected"})
+        chosen = (table, title, notes, text)
+        break
+    anchor["table_html_attempts"] = attempts
+    anchor["table_html_attempt"] = attempts[-1] if attempts else {"status": "failed"}
+    if chosen is None:
+        flag(anchor, "table_html_invalid")
+        return False
+    table, title, notes, text = chosen
+    confidence = attempts[-1].get("confidence")
+    anchor.setdefault("text_candidates", {})["vlm_table_html"] = text
+    anchor["text"] = text
+    anchor["text_source"] = "vlm_table_html"
+    anchor["reading_status"] = "table_vlm_selected"
+    anchor["visual_table"] = table_html.p3_table(table, title, notes)
+    anchor["table_reading"] = {
+        "status": "selected", "method": "html_grid", "confidence": confidence,
+        "attempts": len(attempts),
+    }
+    return True
+
+
 def _select_visual_table_text(
     image: Image.Image, anchor: dict[str, Any], *, grouped: bool,
 ) -> bool:
@@ -214,6 +280,8 @@ def _select_visual_table_text(
     parser_text = str(anchor.get("text") or "")
     candidates = anchor.setdefault("text_candidates", {})
     candidates["pre_table_vlm"] = parser_text
+    if table_html.format_from_env() == "html" and _select_html_table_text(image, anchor):
+        return True
     # 단일 표의 기존 Judge는 전체 bbox를 보았으므로 표 전용 Judge의 참고
     # 후보로만 쓴다. 그룹 앵커의 Judge는 병합 전 한 조각만 본 것이므로 제외한다.
     prior = anchor.get("vlm_judge") or {}

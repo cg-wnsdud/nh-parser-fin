@@ -21,6 +21,7 @@ from ..vlm import client as vlm_client
 
 from . import reading
 from .export import build_p1, build_p3
+from .digital_anchor import anchor_page
 from .hwp_alignment import align_hwp_structure
 from .ids import normalize_region_ids
 from .quality import flag
@@ -594,6 +595,8 @@ def run_full_pipeline(
             # Reader/Judge가 고른 원문을 바탕으로 표 후보만 검증한다. 표가 여러
             # Region에 흩어졌어도 한 심의 항목일 때만 기존 ID로 묶는다.
             verify_visual_tables(images[int(page["page_no"])], page)
+            # PDF 디지털 글자로 최종 문구를 교정한다(anchor 모드). 라벨링보다 먼저다.
+            anchor_page(page)
             _assign_reading_order(page)
             page["semantic_status"] = "complete"
 

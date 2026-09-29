@@ -6,8 +6,8 @@ import re
 from typing import Any
 
 
-P1_VERSION = "nh-ad-parse-evidence-v4"
-P3_VERSION = "nh-ad-region-review-input-v9"
+P1_VERSION = "nh-ad-parse-evidence-v5"
+P3_VERSION = "nh-ad-region-review-input-v10"
 
 
 def build_p1(document: dict[str, Any]) -> dict[str, Any]:
@@ -141,7 +141,9 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             "reference_policy": "P1 and P3 share region_id; review results return region_ids",
             "table_policy": (
                 "verified visual tables and source-structure tables use kind=table; "
-                "visual tables use the final whole-table VLM Judge text when available; "
+                "visual tables read as HTML with a consistent grid use a GFM markdown table "
+                "in selected_text (row spans repeated, column spans only in the first cell); "
+                "otherwise the final whole-table VLM Judge text ('item | value' lines); "
                 "source-structure tables retain their source text; "
                 "cell evidence, parser candidates, and verification stay in P1"
             ),

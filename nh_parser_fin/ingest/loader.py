@@ -92,8 +92,10 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
     import pypdfium2 as pdfium
 
     from .canvas import native_image_dpi, render_pdf_page
+    from ..parse.digital_anchor import mode_from_env
     from .triage import extract_digital_lines, triage_page
 
+    digital_mode = mode_from_env()
     pages: list[LabPage] = []
     pdf = pdfium.PdfDocument(str(path))
     # PDF는 PDFium 텍스트/좌표와 시각 파이프라인만 사용한다. HWP의 DocIR
@@ -117,8 +119,11 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
 
         canvas = render_pdf_page(pdf_page, index + 1, dpi=int(round(dpi)))
         dpi_used = int(round(dpi))
+        # PARSER_V2_DIGITAL_MODE=off 이면 PDF 디지털 텍스트를 읽지 않는다. triage 판정은
+        # 렌더 DPI 결정·진단 기록용으로 그대로 계산한다. anchor(기본)·primary 모드는 줄을
+        # 똑같이 읽고, 쓰는 방식만 run.py에서 달라진다.
         digital_lines: list[dict] = []
-        if verdict.verdict in ("structured", "hybrid"):
+        if digital_mode != "off" and verdict.verdict in ("structured", "hybrid"):
             digital_lines = [
                 line.model_dump(mode="json")
                 for line in extract_digital_lines(pdf_page, dpi_used / 72.0)
@@ -145,6 +150,7 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
                 "sent_px": list(canvas.image.size),
                 "processing_route": "visual",
                 "structure_probe": {},
+                "pdf_digital_text": "disabled" if digital_mode == "off" else digital_mode,
             },
         ))
     return pages

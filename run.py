@@ -20,7 +20,7 @@ from nh_parser_fin.config import MEDIA_DIR, OUTPUT_ROOT, Profile
 from nh_parser_fin.ingest.loader import iter_inputs, load_pages
 from nh_parser_fin.ocr import paddlex as client
 from nh_parser_fin.ocr import tiling, view
-from nh_parser_fin.parse.adapters import build_page_evidence, dedupe_ocr_lines
+from nh_parser_fin.parse.adapters import build_page_evidence, dedupe_ocr_lines, digital_text_needs_ocr
 
 
 def _write_json(path: Path, value) -> None:
@@ -67,6 +67,9 @@ def _digital_lines(pdf, page_no: int, origin: dict, supplied: list[dict] | None 
     if supplied is not None:
         return list(supplied)
     if pdf is None or origin.get("triage") not in ("structured", "hybrid"):
+        return []
+    if origin.get("pdf_digital_text") == "disabled":
+        # PARSER_V2_DIGITAL_MODE=off: PDF 입력은 재추출하지 않는다.
         return []
     from nh_parser_fin.ingest.triage import extract_digital_lines
 
@@ -306,6 +309,16 @@ def main() -> None:
             }
             if not args.compact_output:
                 _write_json(out / "boxes" / f"{key}.json", boxes_record)
+            # anchor 모드(기본): 디지털 줄은 정본 조립에 넣지 않고 글자 교정 재료로만 넘긴다
+            # (parse/digital_anchor.py). PDF 입력에만 적용한다. HWP를 렌더한 PDF의 텍스트층은
+            # 문서 원본 글자라 primary 모드처럼 정본으로 둔다 — 빼면 OCR 문구가 HWP 구조 검증을 통과해 `□`·`▶`·
+            # 띄어쓰기가 빠진 채 보존된다(실측: `12. 예금성상품-입출식 광고7 (1).hwp`).
+            anchor_lines: list[dict] = []
+            if page.origin.get("pdf_digital_text") == "anchor" and digital:
+                anchor_lines, digital = digital, []
+                if digital_text_needs_ocr(anchor_lines, lines):
+                    # 글자 매핑이 깨진 텍스트층은 main과 같은 기준으로 버린다.
+                    anchor_lines = []
             evidence = build_page_evidence(
                 parsing,
                 lines,
@@ -313,6 +326,10 @@ def main() -> None:
                 canvas=list(page.image.size),
                 digital_lines=digital,
             )
+            if anchor_lines:
+                evidence["digital_anchor_lines"] = [
+                    {"text": line.get("text"), "bbox": line.get("bbox")} for line in anchor_lines
+                ]
             evidence.update({
                 "source_file": page.source_file,
                 "origin": page.origin,
