@@ -1,4 +1,4 @@
-from nh_parser_fin.parse.digital_anchor import anchor_page, snap_text
+from nh_parser_fin.parse.digital_anchor import align_spans, anchor_page, snap_text
 
 
 def _line(text, bbox):
@@ -54,7 +54,7 @@ def test_digital_line_absent_from_page_text_is_flagged_missing():
     page = _page([region], lines)
     stats = anchor_page(page)
     assert stats["missing"] == 1
-    assert "digital_text_missing" in region["review_reasons"]
+    assert "digital_text_inserted" in region["review_reasons"]
     assert region["digital_anchor"]["missing_lines"] == ["ㆍ원금균등할부상환 : 대출원금을 균등하게 분할"]
 
 
@@ -107,3 +107,62 @@ def test_graphic_only_line_is_not_suspect():
 def test_tie_prefers_whole_digital_word():
     lines = [_line("가입 전 ‘상품서비스 안내동의서(⑦번동의서)’ 전체 동의 시", [0, 0, 100, 10])]
     assert "(⑦번동의서)" in snap_text("상품서비스 안내동의서(⑦변동의서)", lines)[0]
+
+
+def test_align_restores_dropped_footnote_marker():
+    # 실측(1. 예금성상품 r018): 인쇄 "…동의 시 주1)", VLM "…동의 시1)". 주1)은 본문 옆 작은 줄이다.
+    lines = [_line("가입 전 ‘상품서비스 안내동의서’ 전체 동의 시", [1001, 1820, 1395, 1838]),
+             _line("주1)", [1399, 1819, 1416, 1831]), _line("0.20%p", [1475, 1821, 1533, 1840])]
+    text, spans = align_spans("| 가입 전 ‘상품서비스 안내동의서’ 전체 동의 시1) | 0.20%p |", lines)
+    assert text == "| 가입 전 ‘상품서비스 안내동의서’ 전체 동의 시주1) | 0.20%p |"
+    assert spans == [{"from": "", "to": "주"}]
+
+
+def test_align_removes_words_the_vlm_added():
+    # 실측(20. 대출성상품 r016): 인쇄 "자동이체", VLM "자동으로 이체".
+    lines = [_line("※대출실행일/별도지정일에 지정계좌에서 자동이체 처리", [0, 0, 900, 20])]
+    text, _ = align_spans("※ 대출실행일/별도지정일에 지정계좌에서 자동으로 이체 처리", lines)
+    assert text == "※ 대출실행일/별도지정일에 지정계좌에서 자동이체 처리"
+
+
+def test_align_restores_dropped_symbols_at_end():
+    # 실측(3. 대출성상품 r020): 인쇄 "최고 1.50%p (①+②)", VLM "최고 1.50%p".
+    lines = [_line("● 우대금리 : 최고 1.50%p (①+②)", [0, 0, 400, 20])]
+    text, _ = align_spans("•우대금리 : 최고 1.50%p", lines, own=lines)
+    assert text == "•우대금리 : 최고 1.50%p (①+②)"  # 글머리 기호는 VLM 표기 그대로
+
+
+def test_align_keeps_vlm_bullets_and_long_differences():
+    lines = [_line("ㆍ만기일시상환 : 대출원금은 만기에 일시상환", [0, 0, 400, 20])]
+    assert align_spans("• 만기일시상환 : 대출원금은 만기에 일시상환", lines)[1] == []
+    lines = [_line("가입대상 개인 가입금액 1천원 이상", [0, 0, 400, 20])]
+    assert align_spans("가입대상 개인 적립방식 자유적립식 가입금액 1천원 이상", lines)[1] == []
+
+
+def test_missing_line_is_inserted_in_vertical_order():
+    region = {"region_id": "r15", "bbox": [0, 0, 200, 60], "text": "• 한도대출 : 대출 원금은 만기에 일시상환"}
+    lines = [_line("ㆍ원금균등할부상환 : 대출원금을 균등하게 분할", [0, 0, 200, 18]),
+             _line("ㆍ한도대출: 대출 원금은 만기에 일시상환", [0, 40, 200, 58])]
+    anchor_page(_page([region], lines))
+    assert region["text"].split("\n") == ["ㆍ원금균등할부상환 : 대출원금을 균등하게 분할", "• 한도대출 : 대출 원금은 만기에 일시상환"]
+    assert "digital_text_inserted" in region["review_reasons"]
+
+
+def test_line_copied_from_neighbor_is_flagged():
+    # 실측(14. 대출성상품 r004): 옆 박스의 "· 공무원 연금공단…" 줄이 이 박스에도 들어왔다.
+    a = {"region_id": "a", "bbox": [0, 0, 400, 20], "text": "· 재직기간 3개월 이상 재직중인 공무원\n· 공무원 연금공단을 통해 확인이 가능한 자"}
+    b = {"region_id": "b", "bbox": [0, 30, 400, 50], "text": "· 공무원 연금공단을 통해 확인이 가능한 자"}
+    lines = [_line("재직기간 3개월 이상 재직중인 공무원", [0, 2, 400, 18]), _line("공무원 연금공단을 통해 확인이 가능한 자", [0, 32, 400, 48])]
+    anchor_page(_page([a, b], lines))
+    assert "neighbor_line_duplicated" in a["review_reasons"]
+    assert not b.get("needs_review")
+
+
+def test_align_does_not_pull_neighbor_values_or_break_tables():
+    # 실측(2. 예금성상품(적립식) r005): 근처 줄에 옆 박스의 "연 2.30%"가 섞여 있었다.
+    lines = [_line("기본금리", [0, 0, 100, 20]), _line("연 2.30%", [0, 40, 100, 60])]
+    assert align_spans("기본금리", lines, own=lines[:1])[1] == []
+    # 표 칸 경계를 걸친 차이는 두지 않는다(20. 대출성상품 r021).
+    lines = [_line("운전", [0, 0, 40, 20]), _line("일시상환 1년 이내", [60, 0, 300, 20]), _line("자금", [0, 22, 40, 42])]
+    text = "| 운전자금 | 일시상환 | 1년 이내 |\n| 운전자금 | 할부상환 | 3년 |"
+    assert align_spans(text, lines)[0] == text

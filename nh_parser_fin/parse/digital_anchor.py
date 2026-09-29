@@ -223,6 +223,150 @@ def _covered(line_text: str, region_text: str) -> float:
     return sum(block.size for block in blocks) / len(line)
 
 
+# 문장 정렬: 앞뒤로 이만큼 같은 글자가 이어져야 그 사이 차이를 디지털로 바꾼다.
+ALIGN_ANCHOR = 3
+# 한 번에 바꾸는 구간 길이(공백 제외) 상한. 길면 줄 배정·순서 차이일 가능성이 커서 손대지 않는다.
+ALIGN_MAX_SPAN = 6
+# 글머리·장식 기호. 디지털 쪽 표기(ㆍ·●)를 VLM 표기(•)에 덮어쓰지 않는다.
+_BULLETS = set("•·ㆍ●○◦▪▫■□◾◽▶▷►-–—*※")
+_MARKUP = set("|<>")
+_MARKUP_RE = re.compile(r"<br\s*/?>|\||-{3,}")
+
+
+def _row_order(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """세로로 절반 이상 겹치는 줄을 한 행으로 보고 행 안에서는 왼쪽부터 놓는다.
+
+    본문 옆에 작게 붙은 `주1)` 같은 줄은 윗변이 본문보다 조금 위라 y 정렬만 하면
+    본문 앞에 온다. 같은 행으로 묶어야 `…동의 시` 뒤에 붙는다.
+    """
+    rows: list[list[dict[str, Any]]] = []
+    for line in sorted(lines, key=lambda item: (item["bbox"][1], item["bbox"][0])):
+        box = line["bbox"]
+        for row in rows:
+            ref = row[0]["bbox"]
+            overlap = min(box[3], ref[3]) - max(box[1], ref[1])
+            height = max(1, min(box[3] - box[1], ref[3] - ref[1]))
+            if overlap / height >= 0.5:
+                row.append(line)
+                break
+        else:
+            rows.append([line])
+    return [line for row in rows for line in sorted(row, key=lambda item: item["bbox"][0])]
+
+
+def _usable(char: str) -> bool:
+    return not char.isspace() and unicodedata.category(char) not in ("Co", "Cc", "Cf", "Cs")
+
+
+def _meaningful(chars: str) -> bool:
+    return any(char.isalnum() or unicodedata.category(char) == "No" for char in chars if char not in _BULLETS)
+
+
+def align_spans(
+    text: str, lines: list[dict[str, Any]], own: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[dict[str, str]]]:
+    """VLM 문구와 디지털 글자열을 정렬해, 양옆이 맞는 짧은 차이를 디지털로 메운다.
+
+    낱말 교정(snap_text)이 못 하는 세 경우를 다룬다.
+      - VLM이 글자를 뺐다: `…동의 시1)` → `…동의 시주1)` (작게 붙은 각주 표시)
+      - VLM이 말을 덧붙였다: `자동으로 이체` → `자동이체`
+      - VLM이 기호를 뺐다: `최고 1.50%p` → `최고 1.50%p (①+②)` (문구 끝)
+    바뀐 구간은 공백을 뺀 길이 ALIGN_MAX_SPAN 이하, 양옆에 ALIGN_ANCHOR 글자 이상
+    일치가 있어야 한다(문구 끝은 한쪽만). 표 구분자(`|`)·줄바꿈을 걸치거나 기호만 다른
+    차이는 두지 않는다.
+
+    근처 줄(lines)에는 옆 박스 글자도 섞이므로 넣기·지우기는 좁게 허용한다.
+      - 문장 중간에 넣기: 숫자 없는 2글자 이하(`주`, `려`). 숫자·낱말을 넣으면 옆 칸 값이 들어온다.
+      - 문구 끝에 붙이기: 이 Region 소속 줄(own)의 글자만.
+      - 지우기: 한글 3글자 이하(`으로`). 더 길면 칸 순서 차이일 수 있다.
+    """
+    if not text or not lines:
+        return text, []
+    own_ids = {id(line) for line in own or []}
+    digital_raw, owned = "", []
+    for number, line in enumerate(_row_order(lines)):
+        piece = ("\n" if number else "") + str(line.get("text") or "")
+        digital_raw += piece
+        owned += [id(line) in own_ids] * len(piece)
+    # 마크다운 표 표기(`|`, `---`, `<br>`)는 정렬에서 뺀다. 그대로 두면 일치 구간이 끊긴다.
+    markup = {index for match in _MARKUP_RE.finditer(text) for index in range(match.start(), match.end())}
+    t_pos = [index for index, char in enumerate(text) if _usable(char) and index not in markup]
+    d_pos = [index for index, char in enumerate(digital_raw) if _usable(char)]
+    t_seq = "".join(text[index] for index in t_pos)
+    d_seq = "".join(digital_raw[index] for index in d_pos)
+    if not t_seq or not d_seq:
+        return text, []
+    ops = SequenceMatcher(None, t_seq, d_seq, autojunk=False).get_opcodes()
+    edits: list[tuple[int, int, str, dict[str, str]]] = []
+    for k, (tag, i1, i2, j1, j2) in enumerate(ops):
+        if tag == "equal":
+            continue
+        t_span, d_span = t_seq[i1:i2], d_seq[j1:j2]
+        if max(len(t_span), len(d_span)) > ALIGN_MAX_SPAN:
+            continue
+        if _MARKUP & set(t_span + d_span):
+            continue
+        if not _meaningful(t_span) and not _meaningful(d_span):
+            continue  # 기호만 다르다(• 와 ㆍ 등). VLM 표기를 둔다.
+        before = ops[k - 1] if k > 0 else None
+        after = ops[k + 1] if k + 1 < len(ops) else None
+        left_ok = before is not None and before[0] == "equal" and before[2] - before[1] >= ALIGN_ANCHOR
+        right_ok = after is not None and after[0] == "equal" and after[2] - after[1] >= ALIGN_ANCHOR
+        at_end = after is None and i2 == len(t_seq) and j2 == len(d_seq)
+        if not (left_ok and (right_ok or at_end)):
+            continue
+        if tag == "delete" and (len(t_span) > 3 or not re.fullmatch(r"[가-힣]+", t_span)):
+            continue  # VLM만 가진 숫자·기호·긴 구간은 지우지 않는다. 틀렸어도 표시(suspect)로 남긴다.
+        if tag == "insert" and not at_end and (len(d_span) > 2 or re.search(r"\d", d_span)):
+            continue
+        if at_end and tag == "insert" and not all(owned[d_pos[j]] for j in range(j1, j2)):
+            continue
+        # 원문 위치: 왼쪽 일치 끝 글자 다음부터 오른쪽 일치 첫 글자 앞까지(사이 공백 포함).
+        start = t_pos[i1 - 1] + 1
+        end = t_pos[i2] if i2 < len(t_pos) else len(text)
+        if any(mark in text[start:end] for mark in ("|", "\n", "<br", "---")):
+            continue  # 표 칸·줄 경계를 걸친 차이는 구조 차이다.
+        d_start = d_pos[j1 - 1] + 1
+        d_end = d_pos[j2] if j2 < len(d_pos) else (d_pos[j2 - 1] + 1 if j2 else d_start)
+        replacement = digital_raw[d_start:d_end]
+        if "\n" in replacement:
+            # 디지털 줄 경계. VLM이 그 자리를 띄웠으면 한 칸, 붙였으면 붙인다.
+            gap = " " if any(char.isspace() for char in text[start:end]) else ""
+            replacement = re.sub(r"\s*\n\s*", gap, replacement)
+        if at_end:
+            replacement = replacement.rstrip()
+        replacement = "".join(char for char in replacement if char.isspace() or _usable(char))
+        edits.append((start, end, replacement, {"from": text[start:end], "to": replacement}))
+    for start, end, replacement, _ in sorted(edits, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text, [change for *_, change in edits]
+
+
+def _insert_missing(text: str, own: list[dict[str, Any]], missing: list[str]) -> str:
+    """페이지 어디에도 없는 디지털 줄을 세로 위치에 맞춰 끼워 넣는다.
+
+    문구의 각 줄을 가장 비슷한 소속 디지털 줄에 대응시키고, 빠진 줄은 자기보다 아래에
+    있는 첫 줄 앞에 넣는다. 대응되는 줄이 없으면 끝에 붙인다.
+    """
+    by_text = {str(line.get("text") or ""): line for line in own}
+    text_lines = text.split("\n")
+    anchors: list[float | None] = []
+    for text_line in text_lines:
+        best = max(
+            ((_covered(str(line.get("text") or ""), text_line), line) for line in own
+             if str(line.get("text") or "") not in missing),
+            key=lambda item: item[0], default=(0.0, None),
+        )
+        anchors.append(best[1]["bbox"][1] if best[1] is not None and best[0] >= MISSING_COVERAGE else None)
+    for line_text in sorted(missing, key=lambda value: by_text[value]["bbox"][1]):
+        y = by_text[line_text]["bbox"][1]
+        clean = "".join(char for char in line_text if char.isspace() or _usable(char)).strip()
+        position = next((i for i, value in enumerate(anchors) if value is not None and value > y), len(text_lines))
+        text_lines.insert(position, clean)
+        anchors.insert(position, y)
+    return "\n".join(text_lines)
+
+
 def anchor_page(page: dict[str, Any]) -> dict[str, int]:
     """페이지 Region 문구를 디지털 글자에 맞추고, 빠진 디지털 줄을 찾는다."""
     lines = [
@@ -282,6 +426,16 @@ def anchor_page(page: dict[str, Any]) -> dict[str, int]:
             record["unmatched"] = unmatched
             record["suspect"] = suspect
             stats["unmatched"] += len(unmatched)
+            aligned, spans = align_spans(text, near, own)
+            if spans:
+                region.setdefault("text_candidates", {}).setdefault("pre_digital_anchor", text)
+                region["text"] = aligned
+                text = aligned
+                stats["aligned"] = stats.get("aligned", 0) + len(spans)
+                # 정렬로 메운 낱말은 더 이상 의심하지 않는다.
+                suspect = [word for word in suspect if word in text]
+                record["suspect"] = suspect
+            record["aligned"] = spans
             stats["suspect"] = stats.get("suspect", 0) + len(suspect)
             if suspect:
                 flag(region, "vlm_not_in_digital")
@@ -297,15 +451,58 @@ def anchor_page(page: dict[str, Any]) -> dict[str, int]:
             else:
                 missing.append(line_text)
         if missing:
-            flag(region, "digital_text_missing")
+            # 빠진 줄을 제자리에 끼워 넣고, 사람이 확인하도록 표시는 남긴다.
+            region.setdefault("text_candidates", {}).setdefault("pre_digital_anchor", text)
+            text = _insert_missing(text, own, missing)
+            region["text"] = text
+            flag(region, "digital_text_inserted")
             record["missing_lines"] = missing
             stats["missing"] += len(missing)
+        # 다른 Region 소속 디지털 줄이 이 문구에 통째로 들어 있고 소속 Region에도 있으면
+        # 페이지 Reader가 맞붙은 박스의 줄을 이쪽에도 넣은 것이다(중복).
+        duplicated = []
+        for other_index, other_lines in owner.items():
+            if other_index == index or _nested(region["bbox"], regions[other_index]["bbox"]):
+                continue
+            other_text = _content(str(regions[other_index].get("text") or ""))
+            for line in other_lines:
+                content = _content(line.get("text"))
+                if (
+                    _adjacent(region["bbox"], line["bbox"])
+                    and len(content) >= MISSING_MIN_CHARS
+                    and content in _content(text) and content in other_text
+                    and not any(content in _content(mine.get("text")) for mine in own)
+                ):
+                    duplicated.append(str(line.get("text") or ""))
+        if duplicated:
+            flag(region, "neighbor_line_duplicated")
+            record["duplicated_lines"] = duplicated
+            stats["duplicated"] = stats.get("duplicated", 0) + len(duplicated)
         if moved:
             record["moved_lines"] = moved
             stats["moved"] += len(moved)
         region["digital_anchor"] = record
     page["digital_anchor_stats"] = stats
     return stats
+
+
+def _adjacent(box: list[int], line_box: list[int]) -> bool:
+    """줄이 Region 바로 위·아래(줄 높이 1.5배 이내)에 붙어 있는가.
+
+    같은 유의사항이 상품마다 반복 인쇄되는 광고가 흔하다(4. 카드상품). 멀리 떨어진
+    같은 문구는 중복이 아니라 반복 인쇄이므로, 맞붙은 줄만 본다.
+    """
+    height = max(1, line_box[3] - line_box[1])
+    gap = max(line_box[1] - box[3], box[1] - line_box[3], 0)
+    overlap_x = min(box[2], line_box[2]) - max(box[0], line_box[0])
+    return overlap_x > 0 and gap <= 1.5 * height
+
+
+def _nested(a: list[int], b: list[int]) -> bool:
+    """한 박스가 다른 박스에 대부분(80%) 들어 있는가 — Paddle 부모·자식 박스."""
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    return ix * iy >= 0.8 * max(1, min(_area(a), _area(b)))
 
 
 def _area(bbox: list[int]) -> int:
