@@ -468,7 +468,9 @@ def anchor_page(page: dict[str, Any]) -> dict[str, int]:
             for line in other_lines:
                 content = _content(line.get("text"))
                 if (
-                    _adjacent(region["bbox"], line["bbox"])
+                    # 줄이 이 박스 안에도 걸쳐 있으면 박스끼리 겹친 것이지 잘못 읽은 게 아니다.
+                    line_overlap_ratio(line["bbox"], region["bbox"]) < NEAR_OVERLAP
+                    and _adjacent(region["bbox"], line["bbox"])
                     and len(content) >= MISSING_MIN_CHARS
                     and content in _content(text) and content in other_text
                     and not any(content in _content(mine.get("text")) for mine in own)

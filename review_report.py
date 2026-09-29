@@ -41,6 +41,8 @@ REASON_NAMES = {
     "vlm_judge_low_confidence": "Judge 확신도 낮음",
     "table_html_invalid": "표 HTML 무효(기존 문구 사용)",
     "digital_text_missing": "디지털 줄이 문구에 없음(누락)",
+    "digital_text_inserted": "빠진 디지털 줄을 끼워 넣음",
+    "neighbor_line_duplicated": "옆 영역 줄이 중복으로 들어옴",
     "vlm_not_in_digital": "디지털에 없는 낱말",
     "vlm_blank_with_ocr_text": "빈 판독(OCR엔 글자 있음)",
     "page_reader_fallback": "페이지 판독 누락(crop으로 대체)",
