@@ -310,9 +310,9 @@ HELPERS = [
      "              ink_coverage 0.3 미만\n\n"
      "판정은 렌더 DPI 보조 신호와 origin 기록용\n"
      "이다. triage 결과와 무관하게 모든 페이지가\n"
-     "PaddleX 를 거친다. 디지털 텍스트는 PaddleX\n"
-     "를 대체하는 별도 Region 이 아니라 같은\n"
-     "좌표계의 더 정확한 텍스트 후보다."),
+     "PaddleX 를 거친다. 디지털 텍스트는 Region\n"
+     "을 만들지 않고, 판독 뒤 글자 교정 재료로\n"
+     "쓴다(⑪, PARSER_V2_DIGITAL_MODE=anchor)."),
     (2, "③ 보조 · 왜 픽셀이 아니라 종횡비인가", "code",
      "레이아웃 모델이 입력을 800x800 정사각으로\n"
      "종횡비 무시하고 눌러 넣는다\n"
@@ -344,11 +344,11 @@ HELPERS = [
      "타일 경계에서 잘린 조각이 두 번 세어지는\n"
      "것을 막는 단계다."),
     (5, "⑥ 보조 · 줄 통합과 정본 텍스트", "code",
-     "1  디지털 PDF 줄을 먼저 넣는다\n"
-     "2  디지털 bbox 가 50% 이상 덮은 OCR 줄 제외\n"
-     "3  나머지 OCR 줄 보충 → 읽기 순서 정렬\n\n"
+     "PDF(기본 anchor): OCR 줄만 Region 에 배정\n"
+     "HWP 렌더 PDF · primary 모드:\n"
+     "  디지털 줄 먼저, 50% 이상 덮인 OCR 줄 제외\n\n"
      "정본 우선순위\n"
-     "  디지털 줄 > 줄 조립본 > block_content\n"
+     "  (디지털 줄) > 줄 조립본 > block_content\n"
      "  > 빈 문자열\n\n"
      "block_content 와 줄 조립본의 유사도\n"
      "  0.8 ↑        sources_agree\n"
@@ -491,22 +491,21 @@ STAGE_ROW2 = [
      "· 17x7 조판표 · 1열 이미지 표 → layout_container\n"
      "  (P3 표로 승격하지 않는다)\n"
      "· 하나도 안 맞으면 hwp_structure_page_unmatched"),
-    ("⑪ Region Reader · 표 검증", "vlm",
-     "parse/reading.py\n"
-     "· Region 을 crop 으로 독립 전사한다\n"
-     "  (Reader 에게 OCR 텍스트를 보여주지 않는다)\n"
-     "· crop: 12px 여백 + 이웃을 흰색 마스킹 +\n"
-     "  짧은 변 320px 까지 최대 4배 확대\n"
-     "· 공백 제거 후 일치도 0.95 미만이면 Judge 가\n"
-     "  같은 crop 과 두 후보를 보고 정본을 고른다\n"
-     "· PDF 디지털/OCR/VLM 후보를 Judge 가 대조\n"
-     "· HWP PUA 글리프는 나머지 문맥이 구조와\n"
-     "  맞을 때만 vlm_structure_verified 로 정규화\n"
-     "· 그 뒤 visual_tables.py 가 Paddle/VLM 표\n"
-     "  후보를 페이지+확대 이미지로 확인\n"
-     "· 기존 ID 만 병합, 표 전체를 다시 Judge 판독\n"
-     "· P3 kind=table/평문, text_source=vlm\n"
-     "· PARSER_V2_READING_SCOPE  all / targeted / off"),
+    ("⑪ 페이지 Reader · 표 · 디지털 교정", "vlm",
+     "reading.py · table_html.py · digital_anchor.py\n"
+     "· 페이지+ID 박스 그림으로 20 Region 씩 전사\n"
+     "  (OCR 문구는 주지 않는다). 빠진·빈 것만 crop\n"
+     "· 글자·숫자가 한 자라도 다르면 Judge 가 crop 과\n"
+     "  두 후보(출처 숨김)를 보고 고른다\n"
+     "· HWP 구조와 맞는 Region 은 원문 보존\n"
+     "· visual_tables.py 가 표 후보를 확인하고\n"
+     "  HTML → 격자 → 마크다운 (실패 시 표 Judge)\n"
+     "· PDF 디지털 글자로 낱말·짧은 차이를 교정,\n"
+     "  빠진 줄은 끼워 넣고 검수 표시\n"
+     "  (순서·띄어쓰기는 VLM 을 따른다)\n"
+     "· P3 kind=table/마크다운, text_source=vlm\n"
+     "· 이전 방식: DIGITAL_MODE=primary\n"
+     "  READER_MODE=region TABLE_FORMAT=pipe"),
     ("⑫ 상품별 심의 템플릿", "vlm",
      "parse/templates.py · review/resolution.py\n"
      "templates/ad_templates.json (19종)\n"
@@ -544,16 +543,16 @@ STAGE_ROW2 = [
      "  페이지의 region_id_map 에 남는다"),
     ("⑮ P1 / P3 내보내기", "code",
      "parse/export.py\n"
-     "P1  nh-ad-parse-evidence-v4\n"
+     "P1  nh-ad-parse-evidence-v5\n"
      "  재현 · 원인 분석용 근거 원장\n\n"
-     "P3  nh-ad-region-review-input-v9\n"
+     "P3  nh-ad-region-review-input-v10\n"
      "  region_id · product_id · bbox ·\n"
      "  selected_text · labels · kind ·\n"
      "  needs_review · text_source\n\n"
      "· text_source 는 hwp / digital / ocr / vlm\n"
      "  네 값으로 축약한다\n"
-     "· 표는 kind=table + selected_text 평문\n"
-     "· 원본 셀과 검증 근거는 P1 에만"),
+     "· 표는 kind=table + selected_text 마크다운\n"
+     "· 원본 셀 · 격자 · 검증 근거는 P1 에만"),
 ]
 HWP_STEP = 3   # HWP-5 는 HWP 페이지에서만 도는 조건부 단계 — 들고 나는 화살표를 구분한다.
 for i, (t, s, b) in enumerate(STAGE_ROW2):
@@ -600,7 +599,8 @@ card(
     "recovery_action_uncertain / recovery_low_confidence\n"
     "table_verification_failed / table_region_overlap /\n"
     "table_reading_order_uncertain\n"
-    "digital_text_vlm_disagreement\n"
+    "digital_text_inserted / vlm_not_in_digital /\n"
+    "neighbor_line_duplicated / table_html_invalid\n"
     "ocr_vlm_disagreement / vlm_judge_low_confidence\n"
     "vlm_only_text / vlm_read_failed\n"
     "hwp_structure_page_unmatched      ← HWP 전용\n"
@@ -620,8 +620,9 @@ card(
     "    문서 분류 수\n"
     "  + 페이지 또는 긴 페이지의 의미 밴드 수\n"
     "  + 표 후보 수\n"
-    "  + Reader 대상 Region 수\n"
+    "  + 페이지 Reader 묶음 수 (+ 빠진 Region crop)\n"
     "  + OCR / Reader 불일치 Judge 수\n"
+    "  + 표 HTML 추출 수 (표당 1~2회)\n"
     "  + 규칙으로 못 정한 상품 템플릿 수\n"
     "  + 상품별 라벨링 청크 수\n\n"
     "실행별 실제 호출 · 재시도 · 타임아웃 · 누적\n"
@@ -655,7 +656,7 @@ card(
     "P1 — 근거 원장",
     "outputs/<run>/05-p1.json\n"
     "outputs/<run>/final/<문서>.p1.json\n"
-    "계약 nh-ad-parse-evidence-v4\n\n"
+    "계약 nh-ad-parse-evidence-v5\n\n"
     "· OCR / PDF 원문 줄과 좌표\n"
     "· HWP 구조 근거 (좌표 없음)\n"
     "· PaddleX 영역 관측과 내부 출처\n"
@@ -672,7 +673,7 @@ card(
     "P3 — 심의 입력",
     "outputs/<run>/06-p3.json\n"
     "outputs/<run>/final/<문서>.p3.json\n"
-    "계약 nh-ad-region-review-input-v9\n\n"
+    "계약 nh-ad-region-review-input-v10\n\n"
     "{ region_id, product_id, bbox, selected_text,\n"
     "  labels, kind, needs_review, text_source }\n"
     "검증된 시각 표는 kind=table · VLM 평문.\n"

@@ -82,9 +82,10 @@ def scope_from_env() -> str:
     return value if value in SCOPES else "all"
 
 
-# [실험: 페이지 단위 Reader] `region`(기본)은 Region crop마다 1회, `page`는 페이지
-# 이미지 + Region ID·bbox·Paddle 텍스트 목록으로 한 번에 판독한다. Judge 이하는 같다.
-READER_MODES = ("region", "page")
+# Reader 방식. `page`(기본)는 페이지 이미지 + Region ID·bbox 목록으로 여러 Region을 한 번에
+# 판독하고, 빠진 Region만 crop으로 다시 읽는다. `region`은 Region crop마다 1회 부르는
+# 이전 방식이다. Judge 이하는 같다.
+READER_MODES = ("page", "region")
 # 한 페이지 판독 요청이 감당할 Region 수와 참고 텍스트 길이. 넘으면 페이지 이미지는
 # 그대로 두고 Region 목록만 나눠 부른다. 응답이 잘리면 묶음 전체가 실패하기 때문이다.
 PAGE_READ_CHUNK = 20
@@ -93,17 +94,21 @@ BOX_ISSUES = ["none", "cut_off", "mixed", "no_text"]
 
 
 def reader_mode_from_env() -> str:
-    value = str(os.environ.get("PARSER_V2_READER_MODE", "region")).strip().lower()
-    return value if value in READER_MODES else "region"
+    value = str(os.environ.get("PARSER_V2_READER_MODE", "page")).strip().lower()
+    return value if value in READER_MODES else "page"
 
 
 def judge_prompt_from_env() -> str:
-    value = str(os.environ.get("PARSER_V2_JUDGE_PROMPT", "default")).strip().lower()
-    return value if value in ("default", "blind") else "default"
+    """Judge 프롬프트. `blind`(기본)는 후보 출처를 숨기고 용어 정규화를 금지한다.
+    `default`는 후보 A(OCR/PDF)·B(VLM)를 밝히는 이전 프롬프트다."""
+    value = str(os.environ.get("PARSER_V2_JUDGE_PROMPT", "blind")).strip().lower()
+    return value if value in ("default", "blind") else "blind"
 
 
 def review_rules_from_env() -> str:
-    value = str(os.environ.get("PARSER_V2_REVIEW_RULES", "default")).strip().lower()
+    """`ocr`이면 디지털 원문 없이 판독 품질을 보는 검수 사유(ocr_review_codes)를 켠다.
+    오탐이 많아(실측 judge_new_word 17건 중 실제 오독 2~3건) 기본은 끈다."""
+    value =str(os.environ.get("PARSER_V2_REVIEW_RULES", "default")).strip().lower()
     return value if value in ("default", "ocr") else "default"
 
 
@@ -115,7 +120,7 @@ def ocr_review_codes(
     region: dict[str, Any], parser_text: str, reading: dict[str, Any] | None,
     judge: dict[str, Any] | None,
 ) -> list[str]:
-    """[실험] 디지털 원문 없이 돌릴 때의 판독 품질 검수 사유(N1~N4).
+    """디지털 원문 없이 돌릴 때의 판독 품질 검수 사유(N1~N4). PARSER_V2_REVIEW_RULES=ocr.
 
     - N1 `vlm_blank_with_ocr_text`: 재판독 뒤에도 VLM이 비었는데 OCR 글자가 4자 이상
     - N2 `page_reader_fallback`: 페이지 판독에서 빠져 crop Reader로 대체됨
@@ -142,17 +147,17 @@ def ocr_review_codes(
 
 
 def judge_trigger_from_env() -> str:
-    value = str(os.environ.get("PARSER_V2_JUDGE_TRIGGER", "ratio")).strip().lower()
-    return value if value in ("ratio", "strict") else "ratio"
+    value = str(os.environ.get("PARSER_V2_JUDGE_TRIGGER", "strict")).strip().lower()
+    return value if value in ("ratio", "strict") else "strict"
 
 
 def needs_judge(parser_text: str, reader_text: str) -> bool:
     """Reader와 파서 문구가 달라 crop Judge가 필요한지.
 
-    `ratio`(기본)는 공백 제거 일치도 0.95 미만일 때만 부른다. 긴 문장에서 한 글자만
-    틀리면(`여신`→`연신`, `채움`→`채춤`) 0.95를 넘어 Judge 없이 통과한다.
-    `strict`는 공백·기호를 뺀 글자·숫자가 한 자라도 다르면 부른다. 띄어쓰기·줄바꿈·
+    `strict`(기본)는 공백·기호를 뺀 글자·숫자가 한 자라도 다르면 부른다. 띄어쓰기·줄바꿈·
     글머리 기호 차이만으로는 부르지 않는다.
+    `ratio`는 공백 제거 일치도 0.95 미만일 때만 부르는 이전 방식이다. 긴 문장에서 한
+    글자만 틀리면(`여신`→`연신`, `채움`→`채춤`) 0.95를 넘어 Judge 없이 통과한다.
     """
     if agreement(parser_text, reader_text) < AGREE:
         return True
@@ -162,8 +167,11 @@ def needs_judge(parser_text: str, reader_text: str) -> bool:
 
 
 def page_reader_text_from_env() -> bool:
-    """페이지 Reader에 Paddle 텍스트를 참고로 줄지. `off`면 ID·bbox만 준다(독립 판독)."""
-    return str(os.environ.get("PARSER_V2_PAGE_READER_TEXT", "on")).strip().lower() != "off"
+    """페이지 Reader에 Paddle 텍스트를 참고로 줄지. 기본 `off`는 ID·bbox만 준다(독립 판독).
+
+    `on`이면 모델이 Paddle 텍스트를 그대로 베끼는 경우가 있어 Judge와 독립성이 깨진다.
+    """
+    return str(os.environ.get("PARSER_V2_PAGE_READER_TEXT", "off")).strip().lower() == "on"
 
 
 def _normalized(value: Any) -> str:
@@ -428,7 +436,7 @@ def judge_region(
     parser_text = str(region.get("text") or "")
     reader_text = str(reading.get("text") or "")
     if judge_prompt_from_env() == "blind":
-        # [실험] 후보 출처를 숨기고 용어 정규화를 금지한다. 출처를 알려 주면 모델이
+        # 후보 출처를 숨기고 용어 정규화를 금지한다. 출처를 알려 주면 모델이
         # "VLM 판독"을 더 믿고, 흔한 용어(분할상환)를 인쇄된 표기(할부상환)보다 고른다.
         prompt = f"""첨부 이미지는 광고 문서에서 잘라낸 영역 하나입니다.
 아래 두 후보는 서로 다른 판독기가 만든 것이며 어느 쪽도 정답이 아닐 수 있습니다.
@@ -700,7 +708,13 @@ def read_page(
     page_errors: list[dict[str, Any]] = []
     if mode == "page":
         targets = [region for region in page.get("regions") or [] if should_read(region, scope)]
-        page_readings = read_page_regions(image, page, targets, page_errors) if targets else {}
+        try:
+            page_readings = read_page_regions(image, page, targets, page_errors) if targets else {}
+        except Exception as exc:  # noqa: BLE001
+            # 밴드 자르기 등 묶음 호출 밖에서 실패해도 페이지를 멈추지 않는다. 모든 Region이
+            # 아래에서 crop Reader로 다시 읽히고, 거기서도 실패하면 Region별로 표시된다.
+            page_errors.append({"region_ids": [str(r["region_id"]) for r in targets], "error": str(exc)[:200]})
+            page_readings = {}
         page["page_reader_errors"] = page_errors
         stats["page_reader_missing"] = 0
     for region in page.get("regions") or []:

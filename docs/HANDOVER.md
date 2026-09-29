@@ -270,6 +270,11 @@ PaddleX 호출에는 별도 재시도 래퍼가 없습니다. HTTP 오류나 비
 관련 코드: `run.py::_digital_lines()`, `ingest/triage.py::extract_digital_lines()`,
 `parse/adapters.py::build_page_evidence()`
 
+> 이 절의 통합은 `PARSER_V2_DIGITAL_MODE=primary`(이전 방식)와 HWP 렌더 PDF에 적용됩니다.
+> 기본값 `anchor`에서는 PDF 입력의 디지털 줄을 정본 조립에 넣지 않고 OCR 줄로 Region을 만든
+> 뒤, 판독이 끝나면 `parse/digital_anchor.py`가 디지털 글자로 최종 문구를 교정합니다
+> (5.12 참고). 줄 추출 방식과 글자 매핑이 깨진 텍스트층을 버리는 기준은 같습니다.
+
 PDF 텍스트 좌표는 pt 단위이므로 렌더 DPI를 이용해 페이지 픽셀 좌표로 변환합니다. 표의 같은 행에
 있는 다른 칸이 한 문장으로 붙지 않도록 비정상적으로 큰 가로 간격에서 디지털 줄을 분리합니다.
 
@@ -426,25 +431,48 @@ P1의 `table_checks`에, 원본 구성원은 채택 Region의 `table_detection.s
 
 ### 5.12 영역별 Reader와 Judge
 
-관련 코드: `parse/reading.py`
+관련 코드: `parse/reading.py`, `parse/digital_anchor.py`
 
 표가 아닌 각 Region을 VLM Reader가 독립적으로 다시 전사합니다. OCR 텍스트를 Reader에게 같이
 보여 주지 않아 OCR 오류를 그대로 따라 쓰는 것을 줄입니다.
 
-Reader 입력 crop은 다음과 같이 만듭니다.
+**페이지 Reader(기본, `PARSER_V2_READER_MODE=page`)**: 원본 페이지와 ID 박스를 그린 페이지 두
+장, Region ID·bbox 목록을 주고 최대 20개 Region(참고 글자 2,400자)씩 한 번에 전사합니다.
+긴 페이지는 페이지 맥락 단계와 같은 밴드로 자릅니다. 묶음 하나가 실패해도 다른 묶음은
+유지하고, 빠진 Region은 아래 crop Reader로 다시 읽습니다(`vlm_reading.mode=region_fallback`).
+판독이 비었는데 OCR에 글자·숫자가 4자 이상이면 그 Region만 crop으로 다시 읽습니다
+(`region_blank_recheck`). 서버가 이미지를 약 1,100토큰으로 줄이므로 페이지 한 장이
+Region 수십 개의 crop보다 훨씬 적게 호출됩니다(실측 20개 문서 Reader 551회 → 44회).
+
+**crop Reader**(`region` 모드, 그리고 페이지 판독의 대체 경로) 입력은 다음과 같이 만듭니다.
 
 - bbox 주위 12px 여백을 둡니다.
 - 실제 bbox 밖의 이웃 내용은 흰색으로 가립니다.
 - 작은 crop은 짧은 변 320px 이상이 되도록 최대 4배 확대합니다.
 
 Reader 텍스트와 현재 parser 텍스트는 공백을 제거하고 `SequenceMatcher`로 비교합니다. 일치도가
-0.95 미만이면 동일 crop과 두 후보를 Judge에게 주고 최종 전사를 선택하게 합니다. 한 자리 숫자나
-금리 차이도 심의에서는 중요하므로 높은 일치 임계값을 사용합니다.
+0.95 미만이거나, 공백·기호를 뺀 글자·숫자가 한 자라도 다르면(`PARSER_V2_JUDGE_TRIGGER=strict`,
+기본) 동일 crop과 두 후보를 Judge에게 주고 최종 전사를 선택하게 합니다. 긴 문장의 한 글자
+오독(`여신`→`연신`)은 일치도 0.95를 넘기 때문입니다. Judge 프롬프트(`blind`, 기본)는 후보
+출처를 숨기고 금융 용어·상환방식 명칭을 바꿔 쓰지 말라고 지시합니다. 출처를 밝히면 모델이
+VLM 후보를 믿고 흔한 용어(`분할상환`)를 인쇄된 표기(`할부상환`)보다 골랐습니다.
 
 최종 텍스트 정책은 입력 근거에 따라 다릅니다.
 
-- **디지털 PDF 텍스트가 있는 Region**: VLM이 달리 읽어도 parser 텍스트를 보존하고 불일치 경고만
-  남깁니다.
+- **PDF 디지털 텍스트가 있는 Region(기본 `anchor`)**: Reader/Judge 문구를 최종으로 쓰되, 표 확인
+  뒤·라벨링 전에 `digital_anchor.anchor_page()`가 디지털 글자로 교정합니다.
+  1. 낱말 교정: 4자 이상 한글 낱말이 근처 디지털 글자와 편집 거리 `길이//4` 이하로 유일하게
+     맞으면 바꿉니다. 숫자는 형식이 같고 한 자리만 다른 유일한 짝일 때만 바꿉니다.
+  2. 문장 정렬: 양옆 3자 이상 일치 사이의 6자 이하 차이를 디지털로 메웁니다. 중간 삽입은 숫자
+     없는 2자 이하, 끝 삽입은 이 Region 소속 줄의 글자만, 삭제는 한글 3자 이하만 허용합니다.
+     표 구분자·줄바꿈을 걸친 차이와 글머리 기호만의 차이는 두지 않습니다.
+  3. 줄 확인: 이 Region 소속 디지털 줄이 페이지 어디에도 없으면 세로 위치에 맞춰 끼워 넣고
+     `digital_text_inserted`를 붙입니다. 박스 밖에 붙은 옆 Region 줄이 들어 있으면
+     `neighbor_line_duplicated`, 앞뒤 낱말은 맞는데 디지털에 없는 낱말은 `vlm_not_in_digital`.
+  순서·띄어쓰기·기호는 VLM을 따르고, PUA·제어문자는 넣지 않습니다. 내역은 `digital_anchor`에 남습니다.
+- **디지털 PDF 텍스트가 있는 Region(`primary`, 이전 방식)**: VLM이 달리 읽어도 parser 텍스트를
+  보존하고 불일치 경고만 남깁니다.
+- **HWP 원본 구조와 일치하는 Region**: 모드와 무관하게 원문을 보존합니다.
 - **이미지 OCR 기반 Region**: Judge가 있으면 Judge 결과를, Judge가 필요 없거나 실패하면 Reader
   결과를 최종 텍스트로 사용할 수 있습니다.
 - **Reader가 빈 문자열을 반환**: 기존 OCR 텍스트를 지우지 않습니다.
@@ -543,8 +571,8 @@ p2_r001, p2_r002, ...
 
 관련 코드: `parse/export.py`
 
-P1 계약 버전은 `nh-ad-parse-evidence-v4`, P3 계약 버전은
-`nh-ad-region-review-input-v9`입니다.
+P1 계약 버전은 `nh-ad-parse-evidence-v5`, P3 계약 버전은
+`nh-ad-region-review-input-v10`입니다.
 
 P3 Region의 기본 형태는 다음과 같습니다.
 
@@ -665,6 +693,13 @@ cp .env.example .env
 | `PARSER_V2_TILE_SPAN` | 선택 | 타일 목표 길이, 기본 1600px |
 | `PARSER_V2_ENCODE` | 선택 | PaddleX 전송 이미지 형식, `jpeg` 또는 `png` |
 | `PARSER_V2_READING_SCOPE` | 선택 | Region Reader 범위, `all`/`targeted`/`off` |
+| `PARSER_V2_DIGITAL_MODE` | 선택 | PDF 디지털 텍스트 사용, 기본 `anchor`(교정 재료)/`primary`(정본)/`off` |
+| `PARSER_V2_READER_MODE` | 선택 | 기본 `page`(페이지 단위)/`region`(crop마다) |
+| `PARSER_V2_PAGE_READER_TEXT` | 선택 | 페이지 Reader에 Paddle 문구 전달, 기본 `off` |
+| `PARSER_V2_JUDGE_TRIGGER` | 선택 | 기본 `strict`(글자 한 자 차이도)/`ratio`(일치도 0.95 미만) |
+| `PARSER_V2_JUDGE_PROMPT` | 선택 | 기본 `blind`(출처 숨김)/`default` |
+| `PARSER_V2_TABLE_FORMAT` | 선택 | 시각 표 문구, 기본 `html`(마크다운)/`pipe`(줄 나열) |
+| `PARSER_V2_REVIEW_RULES` | 선택 | `ocr`이면 디지털 없이 판독 품질 검수 사유 추가, 기본 `default` |
 | `KORDOC_COMMAND` | HWP 선택 | Kordoc 실행 명령, 기본 `npx --yes kordoc@4.14.1` |
 | `KORDOC_VERSION` | HWP 선택 | P1 provenance에 기록할 Kordoc 버전, 기본 `4.14.1` |
 | `KORDOC_TIMEOUT` | HWP 선택 | 구조 파싱 timeout, 기본 180초 |
@@ -816,7 +851,9 @@ nh_parser_fin/
 │  ├─ semantic.py              상품 소유권과 상품별 복수 라벨 VLM 판정
 │  ├─ tables.py                이전 표 격자 추정 구현(현재 실행 경로에서는 사용하지 않음)
 │  ├─ hwp_alignment.py         좌표 없는 HWP 구조와 시각 Region 정렬
-│  ├─ reading.py               Region Reader/Judge와 최종 텍스트 선택
+│  ├─ reading.py               페이지/Region Reader·Judge와 최종 텍스트 선택
+│  ├─ digital_anchor.py        PDF 디지털 글자로 최종 문구 교정(anchor 모드)
+│  ├─ table_html.py            시각 표 HTML → 격자 → 마크다운
 │  ├─ templates.py             상품별 템플릿·허용 라벨·review unit 구성
 │  ├─ ids.py                   최종 Region ID 정규화와 참조 갱신
 │  ├─ quality.py               needs_review 및 사유 코드 기록
@@ -867,7 +904,11 @@ P3의 `needs_review=true`는 광고 내용이 위반이라는 뜻이 아닙니�
 | `table_verification_failed` | 표 후보의 이미지 VLM 검증 호출 실패 |
 | `table_region_overlap` | 표 후보 박스가 다른 Region 본문과 중복되어 표 확정 보류 |
 | `table_reading_order_uncertain` | 여러 줄 Region을 묶어 읽기 순서가 불확실함 |
-| `digital_text_vlm_disagreement` | PDF 원문과 VLM 판독이 다르며 PDF 원문을 보존함 |
+| `digital_text_vlm_disagreement` | (`primary` 모드) PDF 원문과 VLM 판독이 다르며 PDF 원문을 보존함 |
+| `digital_text_inserted` | VLM 문구에 없던 이 Region의 PDF 디지털 줄을 끼워 넣음 |
+| `vlm_not_in_digital` | 앞뒤 낱말은 디지털과 맞는데 그 낱말만 PDF 디지털에 없음 |
+| `neighbor_line_duplicated` | 박스 밖 옆 Region의 디지털 줄이 이 Region 문구에도 들어 있음 |
+| `table_html_invalid` | 시각 표 HTML 격자가 맞지 않아 표 Judge 줄 나열로 되돌림 |
 | `ocr_vlm_disagreement` | OCR과 Reader가 다르고 확정 Judge가 없음 |
 | `vlm_judge_low_confidence` | Judge 최종 선택 confidence가 0.7 미만 |
 | `vlm_only_text` | 기존 OCR 텍스트 없이 VLM 판독만 있음 |
@@ -879,7 +920,8 @@ P3의 `needs_review=true`는 광고 내용이 위반이라는 뜻이 아닙니�
 검수 순서는 다음을 권장합니다.
 
 1. `ownership_unknown`, `template_unresolved`: 잘못된 상품/템플릿은 다수 라벨에 연쇄 영향
-2. `digital_text_vlm_disagreement`, `ocr_vlm_disagreement`: 숫자·금리·날짜 우선 확인
+2. `digital_text_inserted`, `vlm_not_in_digital`, `neighbor_line_duplicated`,
+   `digital_text_vlm_disagreement`, `ocr_vlm_disagreement`: 숫자·금리·날짜 우선 확인
 3. `table_*`: 완전 표 여부와 셀 행·열 확인
 4. `label_low_confidence`: Region 원문과 템플릿 구분값 비교
 

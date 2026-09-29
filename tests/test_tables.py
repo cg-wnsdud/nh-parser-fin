@@ -74,7 +74,7 @@ def test_missed_table_groups_read_final_union_and_use_vlm_text(monkeypatch):
     p1 = build_p1({"pages": [page]})
     output = build_p3(p1)
     p3_table = output["pages"][0]["regions"][0]
-    assert output["contract"]["version"] == "nh-ad-region-review-input-v9"
+    assert output["contract"]["version"] == "nh-ad-region-review-input-v10"
     assert p3_table["kind"] == "table"
     assert p3_table["selected_text"] == table["text"]
     assert p3_table["text_source"] == "vlm"

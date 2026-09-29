@@ -1,4 +1,7 @@
-"""[실험] 시각 표를 VLM에 HTML(rowspan/colspan)로 받아 격자·마크다운으로 바꾼다.
+"""시각 표를 VLM에 HTML(rowspan/colspan)로 받아 격자·마크다운으로 바꾼다.
+
+PARSER_V2_TABLE_FORMAT=html(기본). `pipe`는 표 Judge의 `항목 | 값` 줄 나열만 쓰는
+이전 방식이다.
 
 `항목 | 값` 줄 나열은 열이 셋 이상이거나 병합 칸이 있는 표에서 구조를 잃는다.
 HTML은 병합을 표현할 수 있으므로 모델에는 HTML을 받고, 코드가 결정론으로
@@ -52,8 +55,8 @@ PROMPT = """첨부 이미지는 금융광고에서 확인된 표 하나의 전�
 
 
 def format_from_env() -> str:
-    value = str(os.environ.get("PARSER_V2_TABLE_FORMAT", "pipe")).strip().lower()
-    return value if value in FORMATS else "pipe"
+    value = str(os.environ.get("PARSER_V2_TABLE_FORMAT", "html")).strip().lower()
+    return value if value in FORMATS else "html"
 
 
 class _TableParser(HTMLParser):

@@ -119,9 +119,9 @@ def _pdf_pages(path: Path, sizing: str, max_side: int) -> list[LabPage]:
 
         canvas = render_pdf_page(pdf_page, index + 1, dpi=int(round(dpi)))
         dpi_used = int(round(dpi))
-        # [실험: test/no-pdf-digital-text] PARSER_V2_DIGITAL_MODE=off 이면 PDF 디지털
-        # 텍스트를 읽지 않는다. triage 판정은 렌더 DPI 결정·진단 기록용으로 그대로 계산한다.
-        # anchor 모드도 줄은 똑같이 읽고, 쓰는 방식만 run.py에서 달라진다.
+        # PARSER_V2_DIGITAL_MODE=off 이면 PDF 디지털 텍스트를 읽지 않는다. triage 판정은
+        # 렌더 DPI 결정·진단 기록용으로 그대로 계산한다. anchor(기본)·primary 모드는 줄을
+        # 똑같이 읽고, 쓰는 방식만 run.py에서 달라진다.
         digital_lines: list[dict] = []
         if digital_mode != "off" and verdict.verdict in ("structured", "hybrid"):
             digital_lines = [

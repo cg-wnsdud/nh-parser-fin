@@ -208,7 +208,7 @@ def _remove_unexplained_repeats(text: str, parser_text: str) -> tuple[str, int]:
 
 
 def _select_html_table_text(image: Image.Image, anchor: dict[str, Any]) -> bool:
-    """[실험] 표를 HTML로 받아 격자가 온전할 때만 마크다운 문구와 격자를 채택한다.
+    """표를 HTML로 받아 격자가 온전할 때만 마크다운 문구와 격자를 채택한다(TABLE_FORMAT=html).
 
     격자 폭이 행마다 다르거나 빈 자리가 있으면 병합 구조를 잘못 읽은 것이다. 이때는
     기록만 남기고 False를 돌려 기존 `항목 | 값` 경로가 문구를 정하게 한다.

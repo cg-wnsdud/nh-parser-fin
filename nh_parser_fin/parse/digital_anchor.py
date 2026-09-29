@@ -1,18 +1,21 @@
-"""[실험] PDF 디지털 텍스트를 정본이 아니라 글자 교정 재료로 쓴다.
+"""PDF 디지털 텍스트를 정본이 아니라 글자 교정 재료로 쓴다.
 
-main은 디지털 줄을 좌표 순서로 이어 붙여 정본으로 확정한다. 그러면 글머리 기호가 줄
-끝으로 밀리거나(`…이내\\n●`), 띄어쓰기가 빠지거나(`금융의모든순간`), 옆 박스 글자가
-붙는(`…위한NH올원뱅크`) 문구가 VLM이 맞게 읽어도 그대로 나간다.
+primary 모드(이전 방식)는 디지털 줄을 좌표 순서로 이어 붙여 정본으로 확정한다. 그러면
+글머리 기호가 줄 끝으로 밀리거나(`…이내\\n●`), 띄어쓰기가 빠지거나(`금융의모든순간`),
+옆 박스 글자가 붙는(`…위한NH올원뱅크`) 문구가 VLM이 맞게 읽어도 그대로 나간다.
 
 여기서는 순서·띄어쓰기·줄바꿈은 VLM 최종 문구를 따르고, 디지털에서는 **글자만**
-가져온다. VLM 문구의 한글 낱말·숫자가 근처 디지털 글자와 거의 같으면(글자 수가 같고
-몇 글자만 다름) 디지털 글자로 바꾼다. 디지털 글자는 한글·숫자만 쓰므로 깨진 문자열이나
-PUA·특수문자가 문구에 들어가지 않는다. 바꿀 짝이 없는 낱말과, VLM 문구 어디에도
-없는 디지털 줄은 기록하고 검수 대상으로 올린다.
+가져온다. 세 단계다.
+  1) 낱말 교정(snap_text): 한글 낱말·숫자가 근처 디지털 글자와 거의 같으면 바꾼다.
+  2) 문장 정렬(align_spans): 양옆이 맞는 짧은 차이(빠진 각주 표시, 덧붙인 말, 끝 기호)를
+     디지털로 메운다.
+  3) 줄 확인: 페이지 어디에도 없는 소속 디지털 줄은 끼워 넣고, 옆 박스 줄이 들어오면 표시한다.
+깨진 문자열·PUA·제어문자는 문구에 들어가지 않는다. 고친 곳과 의심되는 곳은 Region의
+`digital_anchor`에 남고, 끼워 넣기·의심 낱말·중복 줄은 검수 대상으로 올린다.
 
-    PARSER_V2_DIGITAL_MODE=primary  main과 같음(디지털 줄이 정본)
+    PARSER_V2_DIGITAL_MODE=anchor   이 모듈(기본)
+    PARSER_V2_DIGITAL_MODE=primary  이전 방식(디지털 줄이 정본)
     PARSER_V2_DIGITAL_MODE=off      디지털 텍스트를 읽지 않음
-    PARSER_V2_DIGITAL_MODE=anchor   이 모듈
 """
 from __future__ import annotations
 
@@ -42,8 +45,8 @@ _TOKEN = re.compile(r"[가-힣]+|\d+(?:[.,]\d+)*")
 
 
 def mode_from_env() -> str:
-    value = str(os.environ.get("PARSER_V2_DIGITAL_MODE", "primary")).strip().lower()
-    return value if value in MODES else "primary"
+    value = str(os.environ.get("PARSER_V2_DIGITAL_MODE", "anchor")).strip().lower()
+    return value if value in MODES else "anchor"
 
 
 def _hangul(text: str) -> str:

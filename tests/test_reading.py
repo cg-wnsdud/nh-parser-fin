@@ -267,3 +267,25 @@ def test_stray_json_tail_is_stripped_from_the_text():
     assert reading.clean_text("정상 텍스트") == "정상 텍스트"
     # 값 안의 따옴표가 정상인 경우까지 잘라내지 않는다.
     assert reading.clean_text('연회비 1만2천원') == "연회비 1만2천원"
+
+
+def test_defaults_are_page_reader_with_digital_anchor(monkeypatch):
+    """운영 기본값. 이전 방식은 환경변수로 되돌릴 수 있다."""
+    from nh_parser_fin.parse import digital_anchor, table_html
+    for name in ("PARSER_V2_READER_MODE", "PARSER_V2_PAGE_READER_TEXT", "PARSER_V2_JUDGE_TRIGGER",
+                 "PARSER_V2_JUDGE_PROMPT", "PARSER_V2_REVIEW_RULES", "PARSER_V2_DIGITAL_MODE",
+                 "PARSER_V2_TABLE_FORMAT"):
+        monkeypatch.delenv(name, raising=False)
+    assert reading.reader_mode_from_env() == "page"
+    assert reading.page_reader_text_from_env() is False
+    assert reading.judge_trigger_from_env() == "strict"
+    assert reading.judge_prompt_from_env() == "blind"
+    assert reading.review_rules_from_env() == "default"
+    assert digital_anchor.mode_from_env() == "anchor"
+    assert table_html.format_from_env() == "html"
+    monkeypatch.setenv("PARSER_V2_READER_MODE", "region")
+    monkeypatch.setenv("PARSER_V2_DIGITAL_MODE", "primary")
+    monkeypatch.setenv("PARSER_V2_TABLE_FORMAT", "pipe")
+    assert reading.reader_mode_from_env() == "region"
+    assert digital_anchor.mode_from_env() == "primary"
+    assert table_html.format_from_env() == "pipe"

@@ -69,7 +69,7 @@ def _digital_lines(pdf, page_no: int, origin: dict, supplied: list[dict] | None 
     if pdf is None or origin.get("triage") not in ("structured", "hybrid"):
         return []
     if origin.get("pdf_digital_text") == "disabled":
-        # [실험: test/no-pdf-digital-text] PDF 입력은 재추출하지 않는다.
+        # PARSER_V2_DIGITAL_MODE=off: PDF 입력은 재추출하지 않는다.
         return []
     from nh_parser_fin.ingest.triage import extract_digital_lines
 
@@ -309,9 +309,9 @@ def main() -> None:
             }
             if not args.compact_output:
                 _write_json(out / "boxes" / f"{key}.json", boxes_record)
-            # [실험] anchor 모드: 디지털 줄은 정본 조립에 넣지 않고 글자 교정 재료로만 넘긴다.
-            # PDF 입력에만 적용한다. HWP를 렌더한 PDF의 텍스트층은 문서 원본 글자라
-            # main처럼 정본으로 둔다 — 빼면 OCR 문구가 HWP 구조 검증을 통과해 `□`·`▶`·
+            # anchor 모드(기본): 디지털 줄은 정본 조립에 넣지 않고 글자 교정 재료로만 넘긴다
+            # (parse/digital_anchor.py). PDF 입력에만 적용한다. HWP를 렌더한 PDF의 텍스트층은
+            # 문서 원본 글자라 primary 모드처럼 정본으로 둔다 — 빼면 OCR 문구가 HWP 구조 검증을 통과해 `□`·`▶`·
             # 띄어쓰기가 빠진 채 보존된다(실측: `12. 예금성상품-입출식 광고7 (1).hwp`).
             anchor_lines: list[dict] = []
             if page.origin.get("pdf_digital_text") == "anchor" and digital:
