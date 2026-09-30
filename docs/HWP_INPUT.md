@@ -21,7 +21,16 @@ Paddle이 표라고 표시한 시각 후보와 페이지 VLM이 찾은 누락 �
 ## 실행 환경과 실패 정책
 
 - 사내 `document-processor`가 설치되면 구조 파싱과 HTML 렌더에서 우선 사용합니다. Kordoc 폴백에는 Node.js와 고정 버전 `KORDOC_COMMAND`가 필요합니다.
-- 이 저장소의 기본 Python 설치에는 사설 `document-processor`가 포함되지 않습니다. HWP HTML 경로를 사용할 환경이나 컨테이너에는 접근 가능한 사내 저장소를 별도로 설치해야 합니다. 예: `uv pip install --python .venv/Scripts/python.exe -e ../document-processor`(Windows 개발 환경). 컨테이너에서는 같은 패키지를 빌드 단계에 설치해야 합니다.
+- 이 저장소의 기본 Python 설치에는 사설 `document-processor`가 포함되지 않습니다. HWP HTML 경로를 사용할 환경이나 컨테이너에는 접근 가능한 사내 저장소를 별도로 설치해야 합니다. 컨테이너에서는 같은 패키지를 빌드 단계에 설치해야 합니다.
+- `document-processor`는 `requires-python >=3.13`으로 선언돼 있어 Python 3.11에서는 `pip`와 `uv` 모두 설치를 거부합니다. 3.11에서 테스트와 입력 단계 출력(페이지 픽셀·디지털 텍스트·HWP 구조)이 3.13과 같음을 확인했으므로 저장소를 고치지 않고 버전 검사만 건너뜁니다. `--ignore-requires-python`이 다른 패키지의 검사까지 끄지 않도록 의존성은 먼저 따로 설치하고 `--no-deps`로 설치합니다. 그래야 `pypdfium2`도 lock의 5.12.0으로 유지됩니다. Windows 개발 환경 예(Linux는 `.venv/bin/python`):
+
+  ```bash
+  uv sync --dev
+  uv pip install --python .venv/Scripts/python.exe "jpype1>=1.7.1" "pypdf>=6.2,<7" "python-docx>=1.2" pip
+  .venv/Scripts/python.exe -m pip install --ignore-requires-python --no-deps -e ../document-processor
+  ```
+
+- 이렇게 설치한 패키지는 `uv.lock`에 없으므로 기본 `uv sync`가 제거합니다. 이후 동기화는 `uv sync --dev --inexact`로 합니다. `uv run`은 제거하지 않습니다.
 - HTML 렌더에는 Chromium/Chrome/Edge가 필요하며 `HWP_CHROMIUM`으로 지정할 수 있습니다. LibreOffice 폴백에는 `soffice`가 필요합니다. 설치형 한컴오피스는 사용하지 않습니다.
 - `HWP_RENDER_DIR`을 지정하면 중간 PDF를 보존합니다. `HWP_REVIEW_DIR`을 지정하면 HTML 검토 화면을 보존합니다.
 - 구조 파서 또는 모든 렌더 백엔드가 실패하면 HWP 입력은 명시적으로 중단합니다. 예전 내장 이미지 자산을 가상 페이지로 만드는 경로는 제거했습니다.

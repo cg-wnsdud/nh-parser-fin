@@ -652,7 +652,7 @@ outputs/<run-name>/
 
 ### 7.1 설치
 
-Python 3.13을 기준으로 합니다.
+Python 3.11을 기준으로 합니다. 3.12와 3.13에서도 같은 결과를 확인했습니다.
 
 ```bash
 uv sync --dev
@@ -669,6 +669,8 @@ HWP/HWPX 입력은 현재 HWP 개발 브랜치에서 다음 로컬 실행 환경
 필요합니다.
 
 - document-processor 또는 Node.js/npm과 Kordoc 4.14.1 중 하나의 구조 파서.
+  document-processor는 Python 3.11에서 버전 검사를 건너뛰어 설치합니다. 명령은
+  [HWP_INPUT.md](HWP_INPUT.md)를 참고하세요.
 - HTML/Chromium 또는 LibreOffice 중 하나의 PDF 렌더 백엔드.
 
 이 의존성이 없어도 PDF와 이미지 입력은 실행됩니다. HWP 입력만 구조 파싱 또는 렌더 단계에서
