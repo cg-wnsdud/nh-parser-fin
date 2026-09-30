@@ -10,3 +10,4 @@ dist/
 build/
 *.egg-info/
 samples/
+.vlm_cache_C_20260929/
