@@ -2,6 +2,7 @@
 
 import sys
 
+import pytest
 from PIL import Image
 
 import run
@@ -29,13 +30,14 @@ def test_main_runs_full_pipeline_without_vlm_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "OUTPUT_ROOT", tmp_path / "outputs")
     monkeypatch.setattr(run, "MEDIA_DIR", tmp_path / "media")
 
-    def fake_full_pipeline(documents, tasks, *, out, media_dir, compact_output):
+    def fake_full_pipeline(documents, tasks, *, out, media_dir, compact_output, template_id):
         observed.update(
             documents=documents,
             tasks=tasks,
             out=out,
             media_dir=media_dir,
             compact_output=compact_output,
+            template_id=template_id,
         )
         return [], []
 
@@ -50,3 +52,24 @@ def test_main_runs_full_pipeline_without_vlm_flag(monkeypatch, tmp_path):
     assert len(observed["tasks"]) == 1
     assert observed["out"] == tmp_path / "outputs" / "demo"
     assert observed["compact_output"] is False
+    assert observed["template_id"] is None
+
+
+def test_template_id_is_validated_before_any_page_is_read(monkeypatch, capsys):
+    monkeypatch.setattr(run, "iter_inputs", lambda *args: pytest.fail("inputs must not be read"))
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run.py", "--run-name", "demo", "--input", "x.png", "--template-id", "없는 템플릿"],
+    )
+    with pytest.raises(SystemExit) as exited:
+        run.main()
+    assert exited.value.code == 2
+    assert "알 수 없는 --template-id" in capsys.readouterr().err
+
+
+def test_known_template_id_reaches_the_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run.py", "--run-name", "demo", "--input", "x.png", "--template-id", "예금성상품-적립식"],
+    )
+    assert run._args().template_id == "예금성상품-적립식"

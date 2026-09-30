@@ -39,6 +39,7 @@ from .templates import (
     resolve_product_templates,
     review_units,
     template_label_examples,
+    user_template_resolution,
 )
 
 
@@ -546,8 +547,12 @@ def run_full_pipeline(
     out: Path,
     media_dir: Path,
     compact_output: bool = False,
+    template_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """기준 OCR 결과에 fc87 Gemma 의미 판정을 붙이고 P1/P3를 저장한다."""
+    """기준 OCR 결과에 fc87 Gemma 의미 판정을 붙이고 P1/P3를 저장한다.
+
+    `template_id`가 있으면 상품별 템플릿 자동 선택 대신 그 템플릿을 쓴다.
+    """
     vlm_client.reset_stats()
     started = time.time()
     read_scope = reading.scope_from_env()
@@ -601,9 +606,13 @@ def run_full_pipeline(
             page["semantic_status"] = "complete"
 
         # 2단계 — 상품별 템플릿. 소유권이 나와야 상품군을 알 수 있으므로 여기서 푼다.
-        product_templates = resolve_product_templates(doc, catalog)
+        # 사용자가 템플릿을 지정했으면 자동 선택 없이 그 템플릿을 쓴다.
+        product_templates = resolve_product_templates(doc, catalog, template_id=template_id)
         doc["product_templates"] = product_templates
-        doc["template"] = _document_template(product_templates)
+        doc["template"] = (
+            {**user_template_resolution(catalog, template_id), "scope": "document"}
+            if template_id is not None else _document_template(product_templates)
+        )
 
         # 3단계 — 상품별 라벨링. 한 Region에 해당하는 구분값을 한 번에 모두
         # 받는다. 줄별 span이나 자식 Region은 만들지 않는다.
