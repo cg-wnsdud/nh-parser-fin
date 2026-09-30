@@ -190,7 +190,7 @@ VLM 캐시는 기본적으로 꺼져 있습니다. 개발용 `VLM_CACHE=r`은 �
 
 ## 설치와 실행
 
-Python 3.13을 기준으로 검증합니다.
+Python 3.11을 기준으로 검증합니다. 3.12와 3.13에서도 같은 결과를 확인했습니다.
 
 ```bash
 uv sync --dev
@@ -198,6 +198,10 @@ uv sync --dev
 python -m pip install -e .
 python -m pip install pytest
 ```
+
+HWP 입력에 쓰는 사내 `document-processor`는 `requires-python >=3.13`으로 선언돼 있어
+3.11에서는 일반 설치가 거부됩니다. 코드는 3.11에서 동작하므로 버전 검사만 건너뛰어
+설치합니다. 명령은 [docs/HWP_INPUT.md](docs/HWP_INPUT.md)를 참고하세요.
 
 전체 파이프라인을 실행하려면(페이지 조립 뒤 VLM 판정과 P1/P3 생성까지 수행):
 
