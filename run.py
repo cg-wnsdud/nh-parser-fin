@@ -48,7 +48,21 @@ def _args() -> argparse.Namespace:
         "--compact-output", action="store_true",
         help="파일별 P1/P3·렌더 이미지·HTML 보고서만 저장",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--template-id", default=None,
+        help="사용자가 지정한 광고 템플릿 ID. 주면 모든 상품에 이 템플릿을 쓰고, 없으면 상품별로 자동 선택",
+    )
+    args = parser.parse_args()
+    if args.template_id is not None:
+        from nh_parser_fin.review.catalog import load_catalog
+
+        known = load_catalog().get("templates") or {}
+        if args.template_id not in known:
+            parser.error(
+                f"알 수 없는 --template-id {args.template_id!r}. "
+                f"카탈로그 템플릿: {', '.join(known)}"
+            )
+    return args
 
 
 def _profile(args: argparse.Namespace) -> Profile:
@@ -452,7 +466,7 @@ def main() -> None:
 
     p1, p3 = run_full_pipeline(
         documents, tasks, out=out, media_dir=media_dir,
-        compact_output=args.compact_output,
+        compact_output=args.compact_output, template_id=args.template_id,
     )
     print(f"P1/P3: 문서 {len(p1)}개 / {len(p3)}개")
     if args.compact_output:

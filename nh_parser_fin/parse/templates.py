@@ -169,8 +169,29 @@ def _per_product_value(
     }
 
 
+def user_template_resolution(catalog: dict[str, Any], template_id: str) -> dict[str, Any]:
+    """사용자가 지정한 템플릿. 규칙·VLM 판정을 거치지 않는다.
+
+    심의 앱은 광고 등록 때 상세 상품군을 사람이 확정한다. 그 값이 정본이므로
+    파서가 다시 고르면 판정 단계와 라벨 어휘가 어긋날 수 있다.
+    """
+    template = (catalog.get("templates") or {}).get(template_id)
+    if template is None:
+        raise ValueError(f"카탈로그에 없는 템플릿: {template_id!r}")
+    return {
+        "template_id": template_id,
+        "status": "confirmed",
+        "source": "user_provided",
+        "confidence": 1.0,
+        "reason": "사용자가 지정한 템플릿",
+        "candidates": [template_id],
+        "labels": template_labels(catalog, template_id),
+        "product_group": template.get("product_group"),
+    }
+
+
 def resolve_product_templates(
-    doc: dict[str, Any], catalog: dict[str, Any],
+    doc: dict[str, Any], catalog: dict[str, Any], *, template_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """상품마다 템플릿과 허용 라벨을 정한다.
 
@@ -178,7 +199,12 @@ def resolve_product_templates(
     `_infer_group`으로 내려가 **파일명을 먼저** 보기 때문에, `4. 카드상품.pdf`
     안의 예금 상품도 "카드"로 추론된다. 그래서 소유권 판정이 상품별 상품군과
     상품명 노출 여부를 함께 돌려주고 그 값을 여기서 그대로 쓴다.
+
+    `template_id`를 주면 파서가 찾은 모든 상품과 공통·미확정 영역에 그 템플릿을
+    쓴다. 상품 소유권 판정은 그대로 두고 템플릿 선택만 건너뛴다.
     """
+    if template_id is not None:
+        return _user_product_templates(doc, catalog, template_id)
     meta = _product_meta(doc)
     shared = common_gubun(catalog)
     doc_group = _clean(doc.get("product_group"))
@@ -223,6 +249,44 @@ def resolve_product_templates(
         output[UNKNOWN] = _unknown_resolution(
             output, shared, region_count=len(by_product[UNKNOWN]),
         )
+    return output
+
+
+def _user_product_templates(
+    doc: dict[str, Any], catalog: dict[str, Any], template_id: str,
+) -> dict[str, dict[str, Any]]:
+    """사용자 템플릿을 상품·공통·미확정 영역 모두에 적용한다.
+
+    한 광고에 템플릿이 하나로 확정됐으므로 공통 영역을 교집합으로 좁힐 이유가 없다.
+    상품명 노출 여부는 관찰값으로만 남긴다.
+    """
+    base = user_template_resolution(catalog, template_id)
+    labels = list(base["labels"])
+    labels += [gubun for gubun in common_gubun(catalog) if gubun not in labels]
+    meta = _product_meta(doc)
+    output: dict[str, dict[str, Any]] = {}
+    for product_id, regions in _regions_by_product(doc).items():
+        if product_id in (PAGE_COMMON, UNKNOWN):
+            output[product_id] = {
+                **base,
+                "status": "page_common" if product_id == PAGE_COMMON else "unowned",
+                "labels": labels,
+                "product_name_shown": None,
+                "region_count": len(regions),
+            }
+            continue
+        product = meta.get(product_id) or {}
+        shown, name_consistency = _validate_product_name(
+            product, regions, _clean(product.get("product_name_shown"))
+            or _clean(doc.get("product_name_shown")),
+        )
+        output[product_id] = {
+            **base,
+            "product_name_shown": shown,
+            "product_name_consistency": name_consistency,
+            "product_name": product.get("name"),
+            "region_count": len(regions),
+        }
     return output
 
 

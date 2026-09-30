@@ -222,6 +222,13 @@ uv run python replay.py --from full-check-debug --run-name replay-check
 이미지의 원본 픽셀을 유지하고 PDF를 설정된 크기 정책으로 렌더합니다.
 `--sizing maxside --max-side 2500`은 긴 변을 제한하는 비교 실험용입니다.
 
+템플릿을 사람이 이미 정했으면 `--template-id`로 넘깁니다(예:
+`--template-id "예금성상품-적립식"`). 이 값은 `nh_parser_fin/templates/ad_templates.json`의
+템플릿 ID여야 하며, 없는 ID면 입력을 읽기 전에 종료합니다. 지정하면 상품 소유권 판정은
+그대로 하고, 상품별 템플릿 자동 선택(규칙·VLM)을 건너뛰어 찾은 모든 상품과 공통·미확정
+영역에 그 템플릿의 구분값을 씁니다. P1 `template`·`product_templates`와 P3 `document.template`에는
+`source: "user_provided"`로 기록됩니다. 지정하지 않으면 기존처럼 상품마다 자동 선택합니다.
+
 `--compact-output`의 최종 파일은 다음 위치에 생성됩니다. 여러 입력을 한 번에 실행하면
 `report.html`에서 모든 파일의 P3 영역과 페이지 이미지를 함께 확인할 수 있습니다.
 

@@ -3,6 +3,8 @@
 `resolve_template`은 규칙으로 좁히지 못하면 Gemma를 부른다. 여기서는 규칙만으로
 확정되는 상품군(대출성·예금성 + 상품명 노출 여부)만 써서 네트워크 없이 돈다.
 """
+import pytest
+
 from nh_parser_fin.parse import templates
 from nh_parser_fin.parse import semantic
 from nh_parser_fin.parse import pipeline as full_pipeline
@@ -310,3 +312,51 @@ def test_single_product_does_not_narrow_the_page_common_labels():
     assert common["labels"] == resolved["product_1"]["labels"]
     assert set(templates.common_gubun(catalog)) <= set(common["labels"])
     assert len(common["labels"]) > len(templates.common_gubun(catalog))
+
+
+def test_user_template_applies_to_every_product_without_template_selection(monkeypatch):
+    """사용자가 템플릿을 지정하면 상품이 여럿이어도 규칙·VLM 선택을 하지 않는다."""
+    catalog = load_catalog()
+    monkeypatch.setattr(
+        templates, "resolve_template",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("template selection ran")),
+    )
+    doc = _doc(
+        [
+            {"product_id": "product_1", "name": "NH고향사랑기부적금",
+             "product_group": "예금성", "product_name_shown": "미노출"},
+            {"product_id": "product_2", "name": "어디든대출",
+             "product_group": "대출성", "product_name_shown": "노출"},
+        ],
+        [
+            {"region_id": "r1", "product_id": "product_1", "lines": [{"text": "NH고향사랑기부적금"}]},
+            {"region_id": "r2", "product_id": "product_2", "lines": [{"text": "대출한도"}]},
+            {"region_id": "r3", "product_id": "page_common", "lines": [{"text": "심의필"}]},
+            {"region_id": "r4", "product_id": "unknown", "lines": [{"text": "하단 고지"}]},
+        ],
+        source_file="2. 예금성상품(거치식·적립식 통합).pdf", group="예금성", shown="노출",
+    )
+
+    resolved = templates.resolve_product_templates(doc, catalog, template_id="예금성상품-거치식")
+
+    expected = templates.template_labels(catalog, "예금성상품-거치식")
+    for product_id in ("product_1", "product_2"):
+        assert resolved[product_id]["template_id"] == "예금성상품-거치식"
+        assert resolved[product_id]["source"] == "user_provided"
+        assert resolved[product_id]["labels"] == expected
+    # 상품명 노출 판정은 관찰값으로 남는다.
+    assert resolved["product_1"]["product_name_consistency"]["status"] == "corrected_to_shown"
+    for scope in ("page_common", "unknown"):
+        assert resolved[scope]["template_id"] == "예금성상품-거치식"
+        assert set(expected) <= set(resolved[scope]["labels"])
+        assert set(templates.common_gubun(catalog)) <= set(resolved[scope]["labels"])
+    units = templates.review_units(doc["pages"], resolved)
+    assert {unit["template_id"] for unit in units} == {"예금성상품-거치식"}
+
+
+def test_unknown_user_template_is_rejected():
+    catalog = load_catalog()
+    doc = _doc([], [{"region_id": "r1", "product_id": "product_1", "lines": [{"text": "x"}]}],
+               source_file="a.pdf", group="예금성", shown="노출")
+    with pytest.raises(ValueError, match="카탈로그에 없는 템플릿"):
+        templates.resolve_product_templates(doc, catalog, template_id="예금성상품-지수연동예금(ELD)")
