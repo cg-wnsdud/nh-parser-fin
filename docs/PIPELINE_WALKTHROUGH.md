@@ -292,13 +292,13 @@ Region마다 bbox를 16px 넓힌 범위에 30% 이상 걸친 디지털 줄을 "�
 **ID 정규화**: 모든 판단이 끝난 뒤 배열 순서대로 `pN_r001`부터 다시 번호를 붙입니다. 복구 Region(`pN_x…`)도 여기서 `r`로 바뀝니다.
 부모·자식, 표 구성원 참조도 함께 바꾸고, 원래 ID는 P1의 `source_region_id`·`region_id_map`에 남깁니다.
 
-**P1** `nh-ad-parse-evidence-v5`: 재현·원인 분석용 원장입니다. 모든 관측과 후보, 판정 근거를 담습니다.
+**P1** `nh-ad-parse-evidence-v6`: 재현·원인 분석용 원장입니다. 모든 관측과 후보, 판정 근거를 담습니다.
 - OCR·디지털 줄과 좌표, HWP 구조 근거
 - VLM 소유권·판독·Judge·표·라벨 판정과 근거
 - 디지털 교정 내역(`digital_anchor`), 표 격자(`visual_table`)
 - `needs_review` 사유
 
-**P3** `nh-ad-region-review-input-v10`: 심의 입력입니다. Region마다 아래 필드만 담습니다.
+**P3** `nh-ad-region-review-input-v11`: 심의 입력입니다. Region마다 아래 필드만 담습니다.
 
 | 필드 | 뜻 |
 |---|---|
@@ -310,8 +310,9 @@ Region마다 bbox를 16px 넓힌 범위에 30% 이상 걸친 디지털 줄을 "�
 | `kind` | `text` / `table` |
 | `needs_review` | 파싱 품질 확인이 필요한가 (위반 여부가 아님) |
 | `text_source` | `hwp` / `digital` / `ocr` / `vlm` |
+| `table` | 표 Region만. `table_id`, `source`(`hwp`/`vlm`), `cells`(행·열·병합·머리 여부·문구, HWP는 셀 `bbox`), `row_texts`, HWP 중첩 표 행은 `row`·`context` |
 
-문서에는 `review_units`(상품별 템플릿·허용 라벨·Region ID 묶음)가 붙습니다.
+페이지에는 `tables` 색인(`table_id`, 행·열 수, 머리 행 수, `header_source`, `region_ids`)이 붙고, 문서에는 `review_units`(상품별 템플릿·허용 라벨·Region ID 묶음)가 붙습니다.
 
 ---
 

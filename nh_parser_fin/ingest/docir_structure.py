@@ -48,6 +48,12 @@ def _cell_span(cell: Any, name: str) -> int:
     return max(1, int(getattr(style, name, None) or getattr(cell, name, None) or 1))
 
 
+def _cell_background(cell: Any) -> str | None:
+    """셀 채우기 색. HWP '제목 셀' 속성은 비어 있는 문서가 많아 머리글 판정 근거로 쓴다."""
+    value = getattr(getattr(cell, "cell_style", None), "background", None)
+    return str(value) if value else None
+
+
 def _cell_tables(cell: Any) -> list[Any]:
     tables: list[Any] = []
     for paragraph in getattr(cell, "paragraphs", None) or []:
@@ -128,6 +134,7 @@ def hwp_structure_from_docir(docir: Any, *, parser_version: str = "unknown") -> 
                 "text": text,
                 "has_nested_table": bool(child_tables),
                 "source_id": getattr(cell, "node_id", None),
+                "background": _cell_background(cell),
             })
             for child in child_tables:
                 add_table(

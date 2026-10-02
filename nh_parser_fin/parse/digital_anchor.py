@@ -211,6 +211,9 @@ def _snap_table(table: dict[str, Any], lines: list[dict[str, Any]]) -> None:
     for row in table.get("rows") or []:
         for index, cell in enumerate(row):
             row[index] = snap_text(str(cell or ""), lines)[0] if cell else cell
+    for cell in table.get("cells") or []:
+        if cell.get("text"):
+            cell["text"] = snap_text(str(cell["text"]), lines)[0]
     if table.get("title"):
         table["title"] = snap_text(str(table["title"]), lines)[0]
     table["notes"] = [snap_text(str(note), lines)[0] for note in table.get("notes") or []]
@@ -429,7 +432,11 @@ def anchor_page(page: dict[str, Any]) -> dict[str, int]:
             record["unmatched"] = unmatched
             record["suspect"] = suspect
             stats["unmatched"] += len(unmatched)
-            aligned, spans = align_spans(text, near, own)
+            # 셀 정본이 있는 표의 마크다운은 셀에서 만든 보기다. 머리글 경로 구분자(` / `)와
+            # 병합 칸 반복은 디지털 글자와 맞출 차이가 아니므로 차이 메우기를 하지 않는다.
+            # 실측: 040 우대금리 표 머리글 `세부조건 / 가입기간`이 `세부조건 우대금리 가입기간`이 됐다.
+            grid_table = (region.get("visual_table") or {}).get("cells") is not None
+            aligned, spans = (text, []) if grid_table else align_spans(text, near, own)
             if spans:
                 region.setdefault("text_candidates", {}).setdefault("pre_digital_anchor", text)
                 region["text"] = aligned

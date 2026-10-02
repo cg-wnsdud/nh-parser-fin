@@ -166,3 +166,28 @@ def test_align_does_not_pull_neighbor_values_or_break_tables():
     lines = [_line("운전", [0, 0, 40, 20]), _line("일시상환 1년 이내", [60, 0, 300, 20]), _line("자금", [0, 22, 40, 42])]
     text = "| 운전자금 | 일시상환 | 1년 이내 |\n| 운전자금 | 할부상환 | 3년 |"
     assert align_spans(text, lines)[0] == text
+
+
+def test_grid_table_markdown_is_not_span_aligned_but_cells_get_word_fixes():
+    # 실측(040): 머리글 경로 `세부조건 / 가입기간`의 ` / `가 디지털 글자 `우대금리`로 메워졌다.
+    markdown = "| 우대항목 | 세부조건 / 가입기간 | 우대금리 |\n|---|---|---|\n| 아동수당 수령 | 1년 | 1.5%p |"
+    cells = [
+        {"row": 0, "col": 0, "row_span": 1, "col_span": 1, "is_header": True, "text": "우대항목"},
+        {"row": 0, "col": 1, "row_span": 1, "col_span": 1, "is_header": True, "text": "세부조건"},
+        {"row": 2, "col": 0, "row_span": 1, "col_span": 1, "is_header": False, "text": "아동수당 수령"},
+    ]
+    region = {
+        "region_id": "p1_r001", "bbox": [0, 0, 400, 60], "text": markdown,
+        "text_source": "vlm_table_html",
+        "visual_table": {"rows": [["우대항목", "세부조건"]], "cells": cells, "notes": []},
+    }
+    lines = [
+        _line("우대항목 세부조건 우대금리", [0, 0, 400, 18]),
+        _line("가입기간", [100, 20, 200, 38]),
+        _line("아동수당수령 1년 1.5%p", [0, 40, 400, 58]),
+    ]
+
+    anchor_page(_page([region], lines))
+
+    assert "세부조건 / 가입기간" in region["text"]
+    assert region["digital_anchor"]["aligned"] == []
