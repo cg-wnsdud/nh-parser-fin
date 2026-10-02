@@ -203,8 +203,8 @@ def _structure_lines(structure: dict | None) -> list[str]:
 
 
 def _structure_text_for(render: str, lines: list[str]) -> str | None:
-    """렌더 글자가 가리키는 원본 줄을 찾는다. 렌더 텍스트층은 띄어쓰기가 빠지고
-    줄이 단어 중간에서 끊기므로 위치 확인에만 쓰고, 문구는 원본 줄을 쓴다."""
+    """렌더 글자가 가리키는 원본 줄을 찾는다. 렌더 텍스트층은 화면 줄바꿈대로
+    단어 중간에서도 끊기므로 위치 확인에만 쓰고, 문구는 원본 줄을 쓴다."""
     target = _alnum(render)
     if not target:
         return None
@@ -250,7 +250,7 @@ def _attach_visual_supplements(
     새므로 쓰지 않는다.
     - 행 문구가 이미 담은 내용이면 버린다.
     - 블록 안 렌더 글자로 위치를 확인하고, 그 글자에 맞는 원본 구조 줄을 붙인다.
-      원본 줄을 찾지 못하면 렌더 글자를 붙인다(띄어쓰기가 빠질 수 있음).
+      원본 줄을 찾지 못하면 렌더 글자를 붙인다(화면 줄바꿈이 섞일 수 있음).
     - 렌더 글자가 없으면 이미지 속 글자다. 행에 붙이지 않고 별도 시각 Region으로 남긴다.
     OCR 문구는 P1 ``visual_supplements``에 위치와 함께 근거로만 남는다.
     """

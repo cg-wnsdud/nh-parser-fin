@@ -62,12 +62,14 @@ def native_image_dpi(page: pdfium.PdfPage) -> int | None:
     """
     import pypdfium2.raw as pdfium_c
 
+    from .pdf_geometry import page_bounds
+
     best: float | None = None
     try:
         for obj in page.get_objects(max_depth=2):
             if obj.type != pdfium_c.FPDF_PAGEOBJ_IMAGE:
                 continue
-            left, bottom, right, top = obj.get_bounds()  # pypdfium2 v5 (v4: get_pos)
+            left, bottom, right, top = page_bounds(obj)  # 폼 안 그림도 페이지 pt 로
             w_pt = right - left
             if w_pt <= 1:
                 continue

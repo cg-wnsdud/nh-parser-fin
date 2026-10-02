@@ -6,7 +6,7 @@
 
 1. `ingest/hwp_structure.py`가 사내 `document-processor`로 문단·원본 표 셀을 읽습니다. 사용할 수 없거나 파싱에 실패하면 Kordoc으로 폴백합니다. `HWP_STRUCTURE_ENGINE`으로 한 경로만 지정할 수도 있습니다.
 2. `ingest/hwp_render.py`가 화면 좌표의 기준이 될 PDF를 로컬에서 만듭니다. `auto`는 모든 운영체제에서 document-processor HTML/Chromium → LibreOffice 순서입니다. `HWP_RENDER_BACKEND`로 둘 중 하나를 지정할 수 있습니다.
-3. PDFium이 변환 PDF를 페이지 이미지로 렌더하고 디지털 텍스트 줄과 bbox를 읽습니다. 구조 텍스트는 렌더 페이지의 텍스트와 대조해 페이지별로 다시 배분합니다.
+3. PDFium이 변환 PDF를 페이지 이미지로 렌더하고 디지털 텍스트 줄과 bbox를 읽습니다. 구조 텍스트는 렌더 페이지의 텍스트와 대조해 페이지별로 다시 배분합니다. Chromium 인쇄 PDF는 본문 전체를 축소·y뒤집기 Form XObject 하나에 넣으므로, 줄 추출(`ingest/triage.py`)은 런·도형·그림 좌표를 `ingest/pdf_geometry.py`로 페이지 좌표로 바꿔 씁니다. 예전에는 폼 좌표를 그대로 써서 공백이 엉뚱한 줄에 붙었습니다. 그 결과 띄어쓰기가 사라지거나 가짜 공백이 생겼고, 줄 상자가 페이지 높이만큼 늘어나 004·007 예금성에서는 페이지 전체 크기의 복구 Region이 생겼습니다.
 4. HTML 경로가 DOM 행을 제공하면 `structured_fast` 또는 `hybrid`로 처리합니다. `structured_fast`는 구조 행이 충분할 때 Paddle 호출을 생략하고, `hybrid`는 구조 행에 Paddle 시각 요소를 보완합니다. 이때 구조 표 행 안의 새 문구는 OCR 대신 원본 구조 줄(렌더 글자로 위치 확인)로 채우고, 렌더 글자가 없는 이미지 속 글자만 별도 Region으로 둡니다. 그 밖에는 기존 Paddle/OCR 시각 경로로 갑니다.
 5. `parse/hwp_alignment.py`가 좌표 없는 원본 문구·셀을 화면 Region과 대조합니다. 충분히 맞는 문구만 최종 텍스트로 사용하고, 보이지 않는 이미지 글자는 OCR/VLM 결과로 보완합니다.
 
