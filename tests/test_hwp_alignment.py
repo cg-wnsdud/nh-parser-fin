@@ -229,3 +229,43 @@ def test_one_row_table_uses_hwp_cell_order_when_pdf_order_is_reversed():
     output = p3["pages"][0]["regions"][0]
     assert output["text_source"] == "hwp"
     assert p3["contract"]["text_source_values"] == ["hwp", "digital", "ocr", "vlm"]
+
+
+def test_ocr_text_with_wrong_symbols_and_spacing_takes_hwp_original():
+    # 한글·영숫자는 같지만 OCR이 「」를 []로, 띄어쓰기를 틀리게 읽었다(006-예금성 p1_r003).
+    region = {
+        "region_id": "p1_r001", "bbox": [10, 20, 300, 80],
+        "text": "[NC다이노스 위풍당당적금]가입 안내LMS",
+        "text_source": "paddlex_block_content", "text_candidates": {},
+    }
+    page = {
+        "regions": [region],
+        "hwp_structure": {"paragraphs": [{
+            "source_id": "p1_para0001", "text": "「NC 다이노스 위풍당당적금」 가입 안내 LMS",
+        }], "tables": []},
+    }
+
+    align_hwp_structure(page)
+
+    assert region["text"] == "「NC 다이노스 위풍당당적금」 가입 안내 LMS"
+    assert region["text_source"] == "hwp_structure"
+    assert region["text_candidates"]["pre_hwp_selected"] == "[NC다이노스 위풍당당적금]가입 안내LMS"
+
+
+def test_dom_text_is_not_replaced_for_whitespace_only_difference():
+    region = {
+        "region_id": "p1_r001", "bbox": [10, 20, 300, 80],
+        "text": "대출기간\n1년 이내",
+        "text_source": "document_processor_html", "text_candidates": {},
+    }
+    page = {
+        "regions": [region],
+        "hwp_structure": {"paragraphs": [{
+            "source_id": "p1_para0001", "text": "대출기간 1년 이내",
+        }], "tables": []},
+    }
+
+    align_hwp_structure(page)
+
+    assert region["text"] == "대출기간\n1년 이내"
+    assert region["text_source"] == "document_processor_html"
