@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import html as html_lib
 import re
 import subprocess
@@ -227,21 +228,38 @@ def render_hwp_review_surface(path: Path, output_dir: Path) -> dict[str, Any]:
     """사내 파서의 clean review HTML과 표시 방식 메타데이터를 생성한다."""
     from document_processor import DocIR, DocumentInput, render_review_html
 
+    from .hwp_layers import (
+        detach_floating_images, hwpx_bytes, inject_layers, page_fill_placements, read_layers,
+    )
+
     docir = DocIR.from_file(str(path))
+    # 쪽 배경·떠 있는 그림은 DocIR 이 버리므로 HWPX 원본에서 다시 읽는다(hwp_layers 주석).
+    # 읽기에 실패해도 본문 렌더는 그대로 진행하고, 실패 사유를 manifest 에 남긴다.
+    layers: dict[str, Any] = {}
+    placements: list[dict[str, Any]] = []
+    layer_error = None
+    if os.environ.get("HWP_LAYERS", "on").strip().lower() not in {"off", "false", "0"}:
+        try:
+            layers = read_layers(hwpx_bytes(path))
+            placements = detach_floating_images(docir, layers) + page_fill_placements(docir, layers)
+        except Exception as exc:  # noqa: BLE001 — 배경 복원 실패가 HWP 처리를 막지 않는다
+            layer_error = f"{type(exc).__name__}: {exc}"
+            layers, placements = {}, []
     rendered = render_review_html(
         document=DocumentInput(doc_ir=docir), annotations=[], title=path.stem,
     )
     if not rendered.ok:
-        raise RuntimeError(f"HWP review HTML 생성 실패: {rendered.issues}")
+        raise RuntimeError(f"HWP review HTML 생성 실패: {rendered.validation}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / f"{path.stem}.review.html"
     first_page = next(iter(getattr(docir, "pages", None) or []), None)
     page_width_pt = float(getattr(first_page, "width_pt", None) or 595.28)
     page_height_pt = float(getattr(first_page, "height_pt", None) or 841.89)
+    html, layer_records = inject_layers(rendered.html, docir, layers, placements)
     html_path.write_text(
         inject_review_surface_api(
-            rendered.html,
+            html,
             page_width_pt=page_width_pt,
             page_height_pt=page_height_pt,
         ),
@@ -259,9 +277,13 @@ def render_hwp_review_surface(path: Path, output_dir: Path) -> dict[str, Any]:
         "highlight_api": "window.nhReviewSurface.highlight(nodeIds)",
         "limitations": [
             "원본 한컴 화면의 픽셀 동일 렌더가 아님",
-            "floating table/image placement와 wrapping은 document-processor 지원 범위에 따름",
+            "쪽 배경과 용지·쪽 기준 떠 있는 그림만 HWPX 원본 위치로 복원함"
+            "(표 셀 안 그림·글 비켜 흐르기는 document-processor 지원 범위에 따름)",
             "사용자 화면과 bbox 판정에는 반드시 같은 HTML을 사용해야 함",
         ],
+        # 복원한 겹: 종류(page_fill/floating_image)·쪽·용지 좌표(pt)·원본 감싸기 방식.
+        "layers": layer_records,
+        "layer_error": layer_error,
     }
     manifest_path = output_dir / f"{path.stem}.review.json"
     manifest_path.write_text(
