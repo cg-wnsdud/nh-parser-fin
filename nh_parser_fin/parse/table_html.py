@@ -145,43 +145,95 @@ def is_valid(table: dict[str, Any]) -> bool:
     return bool(table["rows"]) and table["width"] >= 2 and len(table["ragged_widths"]) == 1 and not table["holes"]
 
 
+def full_width(row: list[dict[str, Any] | None]) -> bool:
+    """칸 하나가 표 전체 폭을 덮는 행. 열 머리글이 아니라 구역 제목(`• 시설자금`)이다."""
+    origins = {tuple(value["origin"]) for value in row if value is not None}
+    return len(row) > 1 and len(origins) == 1 and all(value is not None for value in row)
+
+
 def header_rows(table: dict[str, Any]) -> int:
-    """맨 위부터 모든 칸이 <th>인 행 수. 머리글 행이 없는 표(좌측 머리글형)는 0이다."""
+    """맨 위부터 모든 칸이 <th>인 행 수. 머리글 행이 없는 표(좌측 머리글형)는 0이다.
+
+    표 전체 폭의 칸 하나뿐인 행은 구역 제목이라 머리글 행으로 세지 않는다.
+    """
     count = 0
     for row in table["grid"]:
-        if all(value is None or value["header"] for value in row):
+        if not full_width(row) and all(value is None or value["header"] for value in row):
             count += 1
         else:
             break
     return count
 
 
+def to_cells(table: dict[str, Any]) -> list[dict[str, Any]]:
+    """병합이 풀린 격자를 원래 칸 단위 목록(셀 정본)으로 되돌린다.
+
+    칸마다 시작 위치와 병합 크기를 가진다. 마크다운·행 문장은 이 목록에서 다시 만들 수
+    있고, 병합 정보는 이 목록에만 온전히 남는다.
+    """
+    spans = {(item["row"], item["col"]): item for item in table.get("merged") or []}
+    cells = []
+    for r, row in enumerate(table["grid"]):
+        for c, value in enumerate(row):
+            if value is None or value["spanned"]:
+                continue
+            span = spans.get((r, c)) or {}
+            cells.append({
+                "row": r, "col": c,
+                "row_span": int(span.get("rowspan") or 1),
+                "col_span": int(span.get("colspan") or 1),
+                "is_header": bool(value["header"]),
+                "text": value["text"],
+            })
+    return cells
+
+
+def header_paths(table: dict[str, Any]) -> list[list[str]]:
+    """열마다 위에서부터 머리글 문구 경로. 행 병합으로 반복된 같은 문구는 한 번만 둔다."""
+    heads = header_rows(table)
+    paths: list[list[str]] = [[] for _ in range(table["width"])]
+    for r in range(heads):
+        for c, value in enumerate(table["grid"][r]):
+            text = " ".join(str((value or {}).get("text") or "").split())
+            if text and (not paths[c] or paths[c][-1] != text):
+                paths[c].append(text)
+    return paths
+
+
 def to_markdown(table: dict[str, Any]) -> str:
     """격자 → GFM 마크다운.
 
-    행 병합은 각 행에 값을 반복한다 — 그 값이 행마다 적용된다는 뜻이라 반복해도
-    의미가 같다. 열 병합은 첫 칸에만 값을 두고 나머지를 비운다 — 반복하면 다른 열의
-    값처럼 읽힌다. 머리글 행이 없으면 빈 머리글 행을 둔다(마크다운 표는 머리글 행이
-    필수라 첫 데이터 행을 머리글로 올리면 의미가 바뀐다).
+    GFM 표는 머리글을 한 줄만 허용한다. 머리글이 여러 단이면 열마다 위에서부터의 경로를
+    ` / `로 이어 한 줄로 만든다(예: `세부조건 / 가입기간`). 병합 칸은 행·열 모두 덮는
+    칸마다 값을 반복한다 — 비워 두면 그 칸에 값이 없다고 읽힌다. 다만 표 전체 폭을
+    덮는 칸은 구역 제목이라 첫 칸에만 쓴다. 병합의 원래 모양은 셀 정본(`to_cells`)에
+    남는다. 머리글 행이 없으면 빈 머리글 행을 둔다(마크다운 표는 머리글 행이 필수라 첫
+    데이터 행을 머리글로 올리면 의미가 바뀐다).
     """
     grid = table["grid"]
     if not grid:
         return ""
 
+    def escape(text: str) -> str:
+        return text.replace("\n", "<br>").replace("|", "\\|")
+
     def cell_text(value: dict[str, Any] | None) -> str:
-        if value is None or (value["spanned"] and value["span"] == "col"):
-            return ""
-        return value["text"].replace("\n", "<br>").replace("|", "\\|")
+        return "" if value is None else escape(value["text"])
 
     heads = header_rows(table)
     if heads:
-        head = [cell_text(v) for v in grid[heads - 1]]
+        head = [escape(" / ".join(path)) for path in header_paths(table)]
         body = grid[heads:]
     else:
         head = [""] * table["width"]
         body = grid
+    def row_text(row: list[dict[str, Any] | None]) -> list[str]:
+        if full_width(row):
+            return [cell_text(row[0])] + [""] * (len(row) - 1)
+        return [cell_text(value) for value in row]
+
     lines = ["| " + " | ".join(head) + " |", "|" + "|".join("---" for _ in head) + "|"]
-    lines += ["| " + " | ".join(cell_text(v) for v in row) + " |" for row in body]
+    lines += ["| " + " | ".join(row_text(row)) + " |" for row in body]
     return "\n".join(lines)
 
 
@@ -231,5 +283,6 @@ def p3_table(table: dict[str, Any], title: str, notes: list[str]) -> dict[str, A
         "header_rows": header_rows(table),
         "rows": [[(value or {}).get("text", "") for value in row] for row in table["grid"]],
         "merged": table["merged"],
+        "cells": to_cells(table),
         "notes": [note.strip() for note in notes if note.strip()],
     }

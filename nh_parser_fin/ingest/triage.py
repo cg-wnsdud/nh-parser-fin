@@ -19,6 +19,7 @@ import pypdfium2.raw as pdfium_c
 
 from ..config import SETTINGS
 from ..ir import Line
+from .pdf_geometry import page_bounds, page_text_matrix
 from .text_style import fold, is_bold, rgb_hex, strip_subset_prefix
 
 # FPDFText_GetFontInfo 버퍼. 실측 글꼴명이 `TRDBGG+SDGothicNeoa-fSm`(23자) 수준이라 넉넉하다.
@@ -84,11 +85,11 @@ def _object_census(page: pdfium.PdfPage) -> tuple[float, int, float]:
     try:
         for obj in page.get_objects(max_depth=2):
             if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
-                left, bottom, right, top = obj.get_bounds()  # pypdfium2 v5 (v4: get_pos)
+                left, bottom, right, top = page_bounds(obj)  # 폼 안 객체도 페이지 좌표로
                 img_total += max(0.0, right - left) * max(0.0, top - bottom)
             elif obj.type == pdfium_c.FPDF_PAGEOBJ_PATH:
                 path_n += 1
-                left, bottom, right, top = obj.get_bounds()
+                left, bottom, right, top = page_bounds(obj)
                 path_total += max(0.0, right - left) * max(0.0, top - bottom)
     except Exception:
         return 0.0, 0, 0.0
@@ -233,7 +234,11 @@ def _obj_key(obj) -> int:
 
 
 def _text_runs(page: pdfium.PdfPage) -> list[dict]:
-    """TEXT 객체를 (베이스라인, 좌표, 열쇠) 로 모은다. 못 읽으면 빈 리스트."""
+    """TEXT 객체를 (베이스라인, 좌표, 열쇠) 로 모은다. 못 읽으면 빈 리스트.
+
+    좌표는 **페이지 좌표**로 맞춘다. 글자 상자(textpage)는 언제나 페이지 좌표인데, 폼 안
+    런의 상자·행렬은 폼 좌표로 나온다 — `pdf_geometry` 주석의 HWP 렌더 PDF 실측.
+    """
     runs: list[dict] = []
     try:
         objects = list(page.get_objects(max_depth=6))
@@ -243,8 +248,8 @@ def _text_runs(page: pdfium.PdfPage) -> list[dict]:
         if obj.type != pdfium_c.FPDF_PAGEOBJ_TEXT:
             continue
         try:
-            left, bottom, right, top = obj.get_bounds()
-            matrix = obj.get_matrix()
+            left, bottom, right, top = page_bounds(obj)
+            matrix = page_text_matrix(obj)
         except Exception:  # noqa: BLE001
             continue
         if right - left <= 0 or top - bottom <= 0:
@@ -254,6 +259,10 @@ def _text_runs(page: pdfium.PdfPage) -> list[dict]:
             "baseline": matrix.f,
             # 실효 글자 크기. 텍스트 행렬의 가로 배율이 곧 pt 크기다(실측: 본문 8.00 ·
             # `가입기간` 12.62 · `■` 4.00). 행렬을 못 읽으면 잉크 높이로 대신한다.
+            # 선언 글꼴 크기(FPDFTextObj_GetFontSize)는 곱하지 않는다. 곱하면 정확한
+            # pt 가 되지만, `25. 대출성상품`(선언 67)처럼 1.0 이 아닌 샘플 3건에서 허용차가
+            # 커져 표 칸 두 개가 한 줄로 붙었고 HWP 렌더 1건도 같은 이유로 나빠졌다
+            # (2026-10-02 실측). 이 값에 맞춰 둔 허용차를 그대로 쓴다.
             "size": abs(matrix.a) or (top - bottom),
             "box": (left, bottom, right, top),
         })
@@ -277,7 +286,7 @@ def _vertical_dividers(page: pdfium.PdfPage, chars) -> list[tuple[float, float, 
         if obj.type != pdfium_c.FPDF_PAGEOBJ_PATH:
             continue
         try:
-            left, bottom, right, top = obj.get_bounds()
+            left, bottom, right, top = page_bounds(obj)
         except Exception:  # noqa: BLE001
             continue
         w, h = right - left, top - bottom
@@ -333,6 +342,30 @@ def _place_orphan_spaces(pending, runs, buckets, dividers) -> None:
             buckets[best].append(entry)
 
 
+def _space_before_next(chars, position: int):
+    """다음 글자 안쪽에 찍힌 공백을 앞 글자 끝으로 옮긴다.
+
+    줄 안 글자 순서는 x 로 정한다. 그런데 Chromium 이 인쇄한 PDF 의 공백 글리프는
+    상자가 **자기 폭의 끝**에 0폭으로 찍혀 다음 글자 왼쪽보다 오른쪽에 온다 — 실측
+    (2026-10-02, `004-예금성` 렌더): `C`·`다` 사이 공백이 `다` 왼쪽보다 0.6pt 오른쪽,
+    `」`·`가` 사이는 4.2pt 오른쪽. 그대로 정렬하면 `NC다 이노스`처럼 공백이 한 글자씩
+    밀린다. 텍스트 순서상 앞뒤 글자가 같은 줄에 있고 공백이 뒤 글자 왼쪽을 넘어설 때만
+    앞 글자 끝으로 옮긴다. 이미 두 글자 사이에 있는 공백(샘플 PDF)은 건드리지 않는다.
+    """
+    entry = chars[position]
+    if position == 0 or position + 1 >= len(chars):
+        return entry
+    before, after = chars[position - 1], chars[position + 1]
+    if before[0].isspace() or after[0].isspace():
+        return entry
+    tight, prev_box, next_box = entry[1], before[1], after[1]
+    same_line = min(prev_box[3], next_box[3]) > max(prev_box[1], next_box[1])
+    if not same_line or tight[0] <= next_box[0] or next_box[0] < prev_box[2] - 0.5:
+        return entry
+    moved = (prev_box[2], tight[1], prev_box[2], tight[3])
+    return (entry[0], moved, moved, *entry[3:])
+
+
 def _lines_from_runs(chars, runs, dividers) -> list[list] | None:
     """런의 베이스라인으로 줄을 정하고 글자를 그 줄에 담는다.
 
@@ -345,8 +378,10 @@ def _lines_from_runs(chars, runs, dividers) -> list[list] | None:
     index = {r["key"]: i for i, r in enumerate(runs)}
     buckets: list[list] = [[] for _ in runs]
     pending: list = []
-    for entry in chars:
+    for position, entry in enumerate(chars):
         slot = index.get(entry[4])
+        if slot is None and entry[0].isspace():
+            entry = _space_before_next(chars, position)
         if slot is None:
             # **공백은 기하학으로 붙이고 이 경로를 계속 쓴다.** 예전에는 소속 모르는
             # 글자가 하나라도 있으면 통째로 폴백했는데, pdfium 이 홀로 놓인 공백

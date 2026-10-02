@@ -5,9 +5,11 @@ import copy
 import re
 from typing import Any
 
+from .table_cells import build_page_tables
 
-P1_VERSION = "nh-ad-parse-evidence-v5"
-P3_VERSION = "nh-ad-region-review-input-v10"
+
+P1_VERSION = "nh-ad-parse-evidence-v6"
+P3_VERSION = "nh-ad-region-review-input-v11"
 
 
 def build_p1(document: dict[str, Any]) -> dict[str, Any]:
@@ -18,7 +20,11 @@ def build_p1(document: dict[str, Any]) -> dict[str, Any]:
         "purpose": "OCR/PDF/VLM 관측과 정확한 페이지 bbox 보존",
         "bbox_policy": "OCR/PDF/레이아웃 좌표만 exact; VLM은 텍스트와 ID만 판정",
         "text_policy": "parser, VLM Reader, VLM Judge 후보와 최종 선택을 모두 보존",
+        "table_policy": "표 Region의 table_view와 페이지 tables 색인은 원본 칸 근거에서 결정론으로 만든 P3 보기",
     }
+    # ID 정리가 끝난 뒤라 Region ID가 최종값이다. 표 색인은 이 ID를 가리킨다.
+    for page in evidence.get("pages") or []:
+        page["tables"] = build_page_tables(page)
     region_count = sum(len(page.get("regions") or []) for page in evidence.get("pages") or [])
     evidence["summary"] = {
         "page_count": len(evidence.get("pages") or []),
@@ -122,12 +128,18 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
                 "needs_review": bool(region.get("needs_review")),
                 "text_source": _text_source(region),
             }
+            if item["kind"] == "table" and region.get("table_view"):
+                item["table"] = copy.deepcopy(region["table_view"])
             regions_out.append(item)
         pages_out.append({
             "page_no": int(page["page_no"]),
             # bbox를 화면 좌표로 환산하는 데 필요한 최소 메타데이터다.
             "canvas": copy.deepcopy(page.get("canvas")),
             "regions": regions_out,
+            "tables": [
+                table for table in copy.deepcopy(page.get("tables") or [])
+                if any(region_id in kept_ids for region_id in table.get("region_ids") or [])
+            ],
         })
 
     return {
@@ -142,10 +154,15 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             "table_policy": (
                 "verified visual tables and source-structure tables use kind=table; "
                 "visual tables read as HTML with a consistent grid use a GFM markdown table "
-                "in selected_text (row spans repeated, column spans only in the first cell); "
-                "otherwise the final whole-table VLM Judge text ('item | value' lines); "
-                "source-structure tables retain their source text; "
-                "cell evidence, parser candidates, and verification stay in P1"
+                "in selected_text (multi-row headers joined per column with ' / ', merged "
+                "values repeated in every covered cell); otherwise the final whole-table VLM "
+                "Judge text ('item | value' lines); source-structure tables retain their "
+                "source text. The table structure itself is read only from regions[].table.cells "
+                "(table-wide 0-based row/col, row_span/col_span, is_header, text; bbox only for "
+                "HWP display cells). table.source is 'hwp' (source document cells) or 'vlm' "
+                "(VLM HTML estimate); empty cells mean no reliable grid. One table may span "
+                "several regions (HWP rows): pages[].tables lists region_ids per table_id. "
+                "table.row_texts are 'header: value' lines derived from the cells"
             ),
         },
         "document": {

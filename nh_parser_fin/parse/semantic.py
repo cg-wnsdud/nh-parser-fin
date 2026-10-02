@@ -117,6 +117,78 @@ def _short_text(value: Any, limit: int = 700) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# 라벨 프롬프트의 Region 문구 한도. 700자에서 자르면 긴 유의사항 영역 끝의 심의필이
+# 프롬프트에서 사라졌다 — 실측(2026-10-01, 9/30 전수): 심의 표지가 있는데 라벨이 빠진
+# 17건 중 9건이 잘린 경우(12·18·7 카드상품 등). 긴 영역은 앞뒤를 함께 보인다. 끝부분에
+# 심의번호·예금자보호·유의사항이 몰리기 때문이다.
+LABEL_TEXT_LIMIT = 1600
+LABEL_TEXT_TAIL = 500
+
+
+def _label_text(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= LABEL_TEXT_LIMIT:
+        return text
+    head = LABEL_TEXT_LIMIT - LABEL_TEXT_TAIL
+    return f"{text[:head]} …(중략 {len(text) - LABEL_TEXT_LIMIT}자)… {text[-LABEL_TEXT_TAIL:]}"
+
+
+# 심의번호는 형식이 정해진 값이라 VLM 판단 없이 찾는다: 심의(필·번호·일)·심사필 표지
+# 뒤 12자 안에 `0000-0000`, `제2026-06513호`, `0000-000-00000호` 꼴 번호, 또는 번호
+# 바로 뒤의 `(심의일 …)`. 견본 광고의 자리표시(`2026-****`, `제26-○○○○○호`)도 번호로
+# 본다. 실측 표기(9/30 전수): `준법감시인 심의필 2026-0000`, `[여신금융협회 심의필 제
+# 0000-000-00000호 (...)]`, `준법감시인 심의번호 | • 2026-3696`, `금융투자협회 심사필 제
+# 26-00000호`, `2026-0000(심의일 : 2026. 00. 00.)`, OCR 오인식 `심의일 0000-00-00`.
+_NUMBER = r"[\d○●*＊]{2,4}\s*[-‐–]\s*[\d○●*＊]{2,6}(?:\s*[-‐–]\s*[\d○●*＊]{2,6})?\s*호?"
+_REVIEW_NUMBER = re.compile(
+    r"(?:(?:준법감시인|은행연합회|[가-힣]{2,8}협회)\s*)?"
+    rf"심\s*[의사]\s*(?:필|번호|일)?[^\d○●*＊]{{0,12}}?(?:제\s*)?{_NUMBER}"
+    r"(?:\s*\([^()]{0,40}\))?"
+    rf"|{_NUMBER}\s*\(\s*심\s*의\s*일[^()]{{0,30}}\)"
+)
+
+
+def review_number_quote(text: Any) -> str | None:
+    match = _REVIEW_NUMBER.search(str(text or ""))
+    return match.group(0).strip() if match else None
+
+
+def deterministic_label_evidence(text: Any, allowed: list[str]) -> dict[str, str]:
+    """VLM 없이 정할 수 있는 라벨: 줄 시작 표제어 + 형식이 정해진 심의번호."""
+    found = explicit_heading_evidence(text, allowed)
+    if "심의번호" in allowed and "심의번호" not in found:
+        quote = review_number_quote(text)
+        if quote:
+            found["심의번호"] = quote
+    return found
+
+
+def _quote_key(value: str, *, strict: bool) -> str:
+    """인용 비교 열쇠. 공백·표 마크다운 기호·말줄임은 원문 근거 여부와 무관하다.
+
+    실측(9/30 전수 재현): VLM 이 잘린 프롬프트를 베끼며 `…` 까지 넣거나
+    (`준법감시인 심의필 2026-0000(2026.0…`), 표 문구의 `|`·`<br>` 를 빼고 인용해
+    정답 라벨이 버려졌다. ``strict=False`` 는 문장부호까지 지운다(전각 `：` 등).
+    """
+    text = re.sub(r"<br\s*/?>", "", value, flags=re.IGNORECASE)
+    text = re.sub(r"(?:…|\.{3})+\s*$", "", text.strip())
+    text = re.sub(r"[\s|]+", "", text)
+    if not strict:
+        text = re.sub(r"[^0-9A-Za-z가-힣]", "", text)
+    return text
+
+
+def quote_in_source(quote: str, source: str) -> bool:
+    key = _quote_key(quote, strict=True)
+    if not key:
+        return False
+    if key in _quote_key(source, strict=True):
+        return True
+    loose = _quote_key(quote, strict=False)
+    # 문장부호만 다른 경우. 너무 짧은 인용은 우연히 맞을 수 있어 6자 이상만 허용한다.
+    return len(loose) >= 6 and loose in _quote_key(source, strict=False)
+
+
 def _overlay(
     image: Image.Image,
     regions: list[dict[str, Any]],
@@ -731,8 +803,8 @@ def analyze_product_labels(
         region_ids = [str(region["region_id"]) for region in chunk]
         rows = "\n".join(
             f"- {region['region_id']} bbox={region.get('bbox')} "
-            f"explicit_labels={list(explicit_heading_evidence(region.get('text'), labels))} "
-            f"text={_short_text(region.get('text'))}"
+            f"explicit_labels={list(deterministic_label_evidence(region.get('text'), labels))} "
+            f"text={_label_text(region.get('text'))}"
             for region in chunk
         )
         prompt = f"""당신은 농협 금융광고 구분값 라벨러입니다.
@@ -842,16 +914,15 @@ def validate_labels(
             if label in allowed and label not in selected:
                 selected.append(label)
         valid_evidence = []
-        source = " ".join(str((region_texts or {}).get(region_id) or "").split())
+        source = str((region_texts or {}).get(region_id) or "")
         for evidence in item.get("evidence") or []:
             label = str(evidence.get("label") or "")
             quote = str(evidence.get("quote") or "").strip()
-            normalized_quote = " ".join(quote.split())
             if (
                 label in selected
                 and label not in {entry["label"] for entry in valid_evidence}
                 and quote
-                and (region_texts is None or normalized_quote in source)
+                and (region_texts is None or quote_in_source(quote, source))
             ):
                 valid_evidence.append({"label": label, "quote": quote})
 

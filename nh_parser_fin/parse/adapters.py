@@ -165,7 +165,7 @@ def build_page_evidence(
         }
         # 디지털 구조 파서가 이미 준 표/출처/정확도는 뒤 단계에서 다시 추론하지 않도록
         # Region에 그대로 전달한다. PaddleX 블록에는 이 필드가 없어 기존 동작과 같다.
-        for key in ("kind", "table", "bbox_source", "bbox_quality", "structured"):
+        for key in ("kind", "table", "bbox_source", "bbox_quality", "structured", "visual_supplements"):
             if key in block:
                 region[key] = block[key]
         regions.append(region)

@@ -74,11 +74,15 @@ def test_missed_table_groups_read_final_union_and_use_vlm_text(monkeypatch):
     p1 = build_p1({"pages": [page]})
     output = build_p3(p1)
     p3_table = output["pages"][0]["regions"][0]
-    assert output["contract"]["version"] == "nh-ad-region-review-input-v10"
+    assert output["contract"]["version"] == "nh-ad-region-review-input-v11"
     assert p3_table["kind"] == "table"
     assert p3_table["selected_text"] == table["text"]
     assert p3_table["text_source"] == "vlm"
-    assert "table" not in p3_table and "relations" not in p3_table
+    # 격자 없이 `항목 | 값` 줄만 얻은 표: 표 ID는 있지만 셀은 비어 있다.
+    assert p3_table["table"] == {
+        "table_id": "p1_t001", "source": "vlm", "cells": [], "row_texts": [],
+    }
+    assert "relations" not in p3_table
     assert "semantic_structures" not in p1["pages"][0]
     assert "table_areas" not in p1["pages"][0]
     assert len(p1["pages"][0]["table_checks"]) == 1
@@ -190,7 +194,7 @@ def test_paddle_box_containing_duplicate_region_is_not_promoted(monkeypatch):
     assert page["regions"][0]["needs_review"] is True
 
 
-def test_hwp_cells_stay_in_p1_but_p3_has_only_table_kind_and_text():
+def test_hwp_dom_cells_reach_p3_even_without_source_structure():
     region = _region("p1_r001", [10, 10, 180, 40], "대출기간 | 2년")
     region["kind"] = "table"
     region["table"] = {
@@ -206,4 +210,8 @@ def test_hwp_cells_stay_in_p1_but_p3_has_only_table_kind_and_text():
     assert len(p1["pages"][0]["regions"][0]["table"]["cells"]) == 2
     assert p3_region["kind"] == "table"
     assert p3_region["selected_text"] == "대출기간 | 2년"
-    assert "table" not in p3_region
+    # 원본 구조와 연결할 수 없으면 화면 셀을 그대로 쓰고 머리글은 위치 추정으로 남긴다.
+    assert p3_region["table"]["source"] == "hwp"
+    assert [cell["text"] for cell in p3_region["table"]["cells"]] == ["대출기간", "2년"]
+    assert p3_region["table"]["cells"][1]["bbox"] == [80, 10, 180, 40]
+    assert build_p3(p1)["pages"][0]["tables"][0]["header_source"] == "position"

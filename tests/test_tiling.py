@@ -128,26 +128,73 @@ def test_hybrid_suppresses_ocr_subset_of_a_larger_structured_row():
     assert kept == []
 
 
-def test_hybrid_attaches_novel_visual_note_inside_structured_table_row():
-    structured = [{
+def _structured_row(content="원금 및 이자 상환방법\n만기일시상환"):
+    return [{
         "bbox": [100, 100, 900, 300],
         "kind": "table",
-        "content": "원금 및 이자 상환방법\n만기일시상환",
+        "content": content,
         "text_source": "document_processor_html",
         "table": {"source": "document_processor", "notes": []},
     }]
-    visual = [{
-        "bbox": [400, 240, 850, 280],
-        "content": "※ 지정계좌에서 자동이체 처리",
-        "label": "text",
-    }]
 
-    free, attached = _attach_visual_supplements(visual, structured)
 
-    assert attached == 1
-    assert free == []
-    assert structured[0]["content"].endswith("※ 지정계좌에서 자동이체 처리")
-    assert structured[0]["table"]["notes"] == ["※ 지정계좌에서 자동이체 처리"]
+def test_hybrid_attaches_hwp_original_line_located_by_render_text():
+    structured = _structured_row()
+    # OCR은 받침을 틀렸고, 렌더 텍스트층은 글자는 맞지만 띄어쓰기가 빠지고 줄이 끊긴다.
+    visual = [{"bbox": [400, 240, 850, 300], "content": "※지정계좌에서자동이체처리 적용요을", "label": "text"}]
+    digital = [
+        {"bbox": [410, 245, 840, 265], "text": "※지정계좌에서자동이체처리적용"},
+        {"bbox": [410, 270, 840, 290], "text": "요율"},
+    ]
+    structure = {"paragraphs": [], "tables": [{"cells": [
+        {"text": "원금 및 이자 상환방법"},
+        {"text": "만기일시상환\n※ 지정계좌에서 자동이체 처리 적용요율"},
+    ]}]}
+
+    free, attached = _attach_visual_supplements(visual, structured, digital, structure)
+
+    assert (attached, free) == (1, [])
+    assert structured[0]["content"].endswith("\n※ 지정계좌에서 자동이체 처리 적용요율")
+    assert "적용요을" not in structured[0]["content"]
+    assert structured[0]["text_source"] == "document_processor_html_with_structure_text"
+    record = structured[0]["visual_supplements"][0]
+    assert record["action"] == "structure_text_attached"
+    assert record["ocr_text"] == "※지정계좌에서자동이체처리 적용요을"
+    assert record["render_text"] == "※지정계좌에서자동이체처리적용\n요율"
+
+
+def test_hybrid_falls_back_to_render_text_without_matching_structure_line():
+    structured = _structured_row()
+    visual = [{"bbox": [400, 240, 850, 280], "content": "※지정계좌에서자동이체처리 적용요을", "label": "text"}]
+    digital = [{"bbox": [410, 245, 840, 275], "text": "※지정계좌에서자동이체처리적용요율"}]
+
+    free, attached = _attach_visual_supplements(visual, structured, digital)
+
+    assert (attached, free) == (1, [])
+    assert structured[0]["content"].endswith("※지정계좌에서자동이체처리적용요율")
+    assert structured[0]["text_source"] == "document_processor_html_with_render_text"
+
+
+def test_hybrid_drops_ocr_duplicate_of_structured_row():
+    structured = _structured_row("|지점명|\n농협은행\n\n대연동지점")
+    visual = [{"bbox": [120, 120, 880, 160], "content": "|지점명]농협은행대연동지점", "label": "text"}]
+
+    free, attached = _attach_visual_supplements(visual, structured, [])
+
+    assert (attached, free) == (1, [])
+    assert structured[0]["content"] == "|지점명|\n농협은행\n\n대연동지점"
+    assert structured[0]["visual_supplements"][0]["action"] == "duplicate_dropped"
+
+
+def test_hybrid_keeps_image_text_without_render_text_as_separate_block():
+    structured = _structured_row()
+    visual = [{"bbox": [400, 240, 850, 280], "content": "NH농협금융", "label": "text"}]
+
+    free, attached = _attach_visual_supplements(visual, structured, [])
+
+    assert (attached, free) == (0, visual)
+    assert structured[0]["content"] == "원금 및 이자 상환방법\n만기일시상환"
+    assert structured[0]["table"]["notes"] == []
 
 
 def test_hybrid_discards_paddle_table_html_when_dom_rows_exist():

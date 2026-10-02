@@ -32,6 +32,7 @@ from .semantic import (
     analyze_product_labels,
     constrain_title_labels,
     constrain_rate_calculation_labels,
+    deterministic_label_evidence,
     explicit_heading_evidence,
 )
 from .templates import (
@@ -370,7 +371,7 @@ def _label_pages(
             by_region = {item["region_id"]: item for item in result["region_labels"]}
             for region in regions:
                 decision = by_region[str(region["region_id"])]
-                heading_evidence = explicit_heading_evidence(region.get("text"), labels)
+                heading_evidence = deterministic_label_evidence(region.get("text"), labels)
                 selected = list(heading_evidence)
                 selected += [
                     label for label in decision["labels"] if label not in selected
@@ -379,8 +380,12 @@ def _label_pages(
                 selected = constrain_rate_calculation_labels(region, selected)
                 region["semantic_labels"] = selected
                 decision["labels"] = list(selected)
+                headings = explicit_heading_evidence(region.get("text"), labels)
                 evidence = [
-                    {"label": label, "quote": quote, "source": "explicit_heading"}
+                    {
+                        "label": label, "quote": quote,
+                        "source": "explicit_heading" if label in headings else "review_number_rule",
+                    }
                     for label, quote in heading_evidence.items() if label in selected
                 ]
                 evidence += [

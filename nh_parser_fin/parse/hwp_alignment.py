@@ -227,7 +227,16 @@ def align_hwp_structure(page: dict[str, Any]) -> dict[str, int]:
                 and _normalized(other.get("text")) not in previous_norm
             ]
             region["hwp_structure_validation"]["foreign_region_ids"] = foreign_regions
-            if not foreign_regions and previous_norm != source_norm:
+            # 한글·영숫자가 같아도 기호·띄어쓰기가 다르면 OCR·렌더 줄의 문구다
+            # (`[NC다이노스 …]` ↔ 원본 `「NC 다이노스 …」`). 구조 원문으로 바꾼다.
+            # HTML DOM 문구는 같은 원본에서 왔으므로 줄바꿈 차이만으로 바꾸지 않는다.
+            structured_text = str(region.get("text_source") or "").startswith(
+                ("document_processor", "hwp_structure")
+            )
+            differs = previous_norm != source_norm or (
+                not structured_text and " ".join(previous.split()) != " ".join(source_text.split())
+            )
+            if not foreign_regions and differs:
                 region["text_candidates"]["pre_hwp_selected"] = previous
                 region["text"] = source_text
                 region["text_source"] = "hwp_structure"

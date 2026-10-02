@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import html as html_lib
 import re
 import subprocess
@@ -98,6 +99,37 @@ _SCRIPT = r"""
         cells: values,
       });
     };
+    // 문단 단위 행. 빈 문단(빈 줄)도 구분자로 내보낸다 — 의미 단위 묶기는 Python
+    // `dom_rows_to_blocks` 가 한다. index 는 부모의 자식 순번이라 사이에 표가 끼면 끊긴다.
+    const pushParagraphs = (container, groupId, page, extra) => {
+      const children = Array.from(container.children);
+      Array.from(container.querySelectorAll(':scope > p[data-node-id]')).forEach(paragraph => {
+        const rect = rectFor(paragraph);
+        const value = {
+          node_id: rect.node_id || '',
+          col: extra.col || 0,
+          col_span: extra.col_span || 1,
+          row_span: 1,
+          bbox: rect.bbox,
+          text: rect.text,
+        };
+        const index = children.indexOf(paragraph);
+        rows.push({
+          node_id: `domparagraph:${value.node_id || groupId}:${index}`,
+          page_no: page ? Number(page.dataset.pageNumber || page.dataset.page || 1) : 1,
+          bbox: rect.bbox,
+          text: rect.text,
+          cells: rect.text ? [value] : [],
+          paragraph: {group: groupId, index, blank: !rect.text},
+        });
+      });
+    };
+    // 표 밖 본문 문단. 예전에는 표 행만 읽어 LMS형 HWP(004·006·007 예금성)가 블록 1개로
+    // 시각 경로(PaddleX 큰 상자)에 떨어졌다.
+    document.querySelectorAll('.document-page').forEach((page, pageIndex) => {
+      const content = page.querySelector('.document-page__content');
+      if (content) pushParagraphs(content, `page${page.dataset.pageNumber || pageIndex + 1}`, page, {});
+    });
     document.querySelectorAll('.document-page table').forEach((table, tableIndex) => {
       Array.from(table.rows || []).forEach((row, rowIndex) => {
         const cells = Array.from(row.cells || []);
@@ -151,19 +183,8 @@ _SCRIPT = r"""
             headerValues,
           );
           largeCells.forEach((cell, cellIndex) => {
-            Array.from(cell.querySelectorAll(':scope > p[data-node-id]'))
-              .map((paragraph, paragraphIndex) => ({
-                ...valueFor(paragraph, cellIndex),
-                col_span: Number(cell.colSpan || 1),
-                row_span: 1,
-                paragraph_index: paragraphIndex,
-              }))
-              .filter(value => value.text)
-              .forEach(value => pushValues(
-                `domparagraph:${value.node_id || cellIndex}:${value.paragraph_index}`,
-                page,
-                [value],
-              ));
+            pushParagraphs(cell, cell.dataset.nodeId || `cell${tableIndex}.${rowIndex}.${cellIndex}`,
+              page, {col: cellIndex, col_span: Number(cell.colSpan || 1)});
           });
           return;
         }
@@ -227,21 +248,38 @@ def render_hwp_review_surface(path: Path, output_dir: Path) -> dict[str, Any]:
     """사내 파서의 clean review HTML과 표시 방식 메타데이터를 생성한다."""
     from document_processor import DocIR, DocumentInput, render_review_html
 
+    from .hwp_layers import (
+        detach_floating_images, hwpx_bytes, inject_layers, page_fill_placements, read_layers,
+    )
+
     docir = DocIR.from_file(str(path))
+    # 쪽 배경·떠 있는 그림은 DocIR 이 버리므로 HWPX 원본에서 다시 읽는다(hwp_layers 주석).
+    # 읽기에 실패해도 본문 렌더는 그대로 진행하고, 실패 사유를 manifest 에 남긴다.
+    layers: dict[str, Any] = {}
+    placements: list[dict[str, Any]] = []
+    layer_error = None
+    if os.environ.get("HWP_LAYERS", "on").strip().lower() not in {"off", "false", "0"}:
+        try:
+            layers = read_layers(hwpx_bytes(path))
+            placements = detach_floating_images(docir, layers) + page_fill_placements(docir, layers)
+        except Exception as exc:  # noqa: BLE001 — 배경 복원 실패가 HWP 처리를 막지 않는다
+            layer_error = f"{type(exc).__name__}: {exc}"
+            layers, placements = {}, []
     rendered = render_review_html(
         document=DocumentInput(doc_ir=docir), annotations=[], title=path.stem,
     )
     if not rendered.ok:
-        raise RuntimeError(f"HWP review HTML 생성 실패: {rendered.issues}")
+        raise RuntimeError(f"HWP review HTML 생성 실패: {rendered.validation}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / f"{path.stem}.review.html"
     first_page = next(iter(getattr(docir, "pages", None) or []), None)
     page_width_pt = float(getattr(first_page, "width_pt", None) or 595.28)
     page_height_pt = float(getattr(first_page, "height_pt", None) or 841.89)
+    html, layer_records = inject_layers(rendered.html, docir, layers, placements)
     html_path.write_text(
         inject_review_surface_api(
-            rendered.html,
+            html,
             page_width_pt=page_width_pt,
             page_height_pt=page_height_pt,
         ),
@@ -259,9 +297,13 @@ def render_hwp_review_surface(path: Path, output_dir: Path) -> dict[str, Any]:
         "highlight_api": "window.nhReviewSurface.highlight(nodeIds)",
         "limitations": [
             "원본 한컴 화면의 픽셀 동일 렌더가 아님",
-            "floating table/image placement와 wrapping은 document-processor 지원 범위에 따름",
+            "쪽 배경과 용지·쪽 기준 떠 있는 그림만 HWPX 원본 위치로 복원함"
+            "(표 셀 안 그림·글 비켜 흐르기는 document-processor 지원 범위에 따름)",
             "사용자 화면과 bbox 판정에는 반드시 같은 HTML을 사용해야 함",
         ],
+        # 복원한 겹: 종류(page_fill/floating_image)·쪽·용지 좌표(pt)·원본 감싸기 방식.
+        "layers": layer_records,
+        "layer_error": layer_error,
     }
     manifest_path = output_dir / f"{path.stem}.review.json"
     manifest_path.write_text(
@@ -302,6 +344,62 @@ def read_dom_rows(html_path: Path, browser: str, *, timeout: int = 300) -> list[
     return list(payload.get("rows") or [])
 
 
+# 문단 묶기. 표 밖 본문이나 큰 셀 안 본문은 HWP 문단(엔터) 하나가 대개 화면 한 줄이라
+# 문단마다 Region 을 만들면 줄 단위가 되고(008 예금성 28개), 통째로 두면 페이지 하나가
+# 된다(006 예금성 PaddleX 상자 1개). 심의 항목 단위로 묶는다: 빈 줄·표·항목 기호에서
+# 새 묶음을 열고, 하위 기호(`-`·`*`·①)나 기호 없는 줄은 바로 위 항목에 잇는다.
+_ITEM_START = re.compile(r"^\s*(?:[▶▷►□■◆◇●○◎◈★☆※☞✔❖]|\d{1,2}[.)]\s|[가-하][.)]\s)")
+
+
+def _group_paragraph_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`domparagraph` 행들을 항목 단위 행으로 합친다. 나머지 행은 그대로 둔다."""
+    others = [row for row in rows if not row.get("paragraph")]
+    paragraphs = sorted(
+        (row for row in rows if row.get("paragraph")),
+        key=lambda row: (
+            int(row.get("page_no") or 1), str(row["paragraph"].get("group")),
+            int(row["paragraph"].get("index") or 0),
+        ),
+    )
+    groups: list[list[dict[str, Any]]] = []
+    previous = None
+    for row in paragraphs:
+        meta = row["paragraph"]
+        key = (int(row.get("page_no") or 1), str(meta.get("group")))
+        continues = (
+            previous is not None
+            and key == previous[0]
+            and int(meta.get("index") or 0) == previous[1] + 1
+            and groups and groups[-1]
+        )
+        previous = (key, int(meta.get("index") or 0))
+        if meta.get("blank") or not str(row.get("text") or "").strip():
+            groups.append([])  # 빈 줄은 묶음을 닫는다
+            continue
+        if not continues or _ITEM_START.match(str(row.get("text") or "")):
+            groups.append([])
+        groups[-1].append(row)
+    merged = []
+    for members in (group for group in groups if group):
+        cells = [cell for member in members for cell in member.get("cells") or []]
+        boxes = [member["bbox"] for member in members if member.get("bbox")]
+        merged.append({
+            "node_id": f"domparagraphs:{members[0]['node_id'].split(':', 1)[-1]}",
+            "page_no": members[0].get("page_no"),
+            "bbox": [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                     max(b[2] for b in boxes), max(b[3] for b in boxes)],
+            "text": "\n".join(str(member.get("text") or "") for member in members),
+            # 한 묶음은 표가 아니라 문단 하나다. 문단 node_id 는 모두 유지한다.
+            "cells": [{
+                **cells[0], "bbox": [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                     max(b[2] for b in boxes), max(b[3] for b in boxes)],
+                "text": "\n".join(cell["text"] for cell in cells),
+            }] if cells else [],
+            "paragraph_node_ids": [cell.get("node_id") for cell in cells if cell.get("node_id")],
+        })
+    return others + merged
+
+
 def dom_rows_to_blocks(
     rows: list[dict[str, Any]],
     *,
@@ -310,6 +408,7 @@ def dom_rows_to_blocks(
     page_css_size: tuple[float, float],
 ) -> list[dict[str, Any]]:
     """표시 HTML의 CSS 좌표를 파이프라인 캔버스 좌표의 행 Region으로 바꾼다."""
+    rows = _group_paragraph_rows(rows)
     css_width, css_height = page_css_size
     scale_x = canvas[0] / max(css_width, 1.0)
     scale_y = canvas[1] / max(css_height, 1.0)
@@ -367,8 +466,9 @@ def dom_rows_to_blocks(
             "bbox_quality": "display_exact",
             "structured": {
                 "source": "document_processor_html",
-                "node_kind": "dom_table_row",
-                "node_ids": [cell["node_id"] for cell in cells if cell["node_id"]],
+                "node_kind": "dom_paragraph_group" if row.get("paragraph_node_ids") else "dom_table_row",
+                "node_ids": list(row.get("paragraph_node_ids") or [])
+                or [cell["node_id"] for cell in cells if cell["node_id"]],
                 "surface_node_id": str(row.get("node_id") or ""),
             },
         }

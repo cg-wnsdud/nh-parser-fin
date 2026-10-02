@@ -571,8 +571,9 @@ p2_r001, p2_r002, ...
 
 관련 코드: `parse/export.py`
 
-P1 계약 버전은 `nh-ad-parse-evidence-v5`, P3 계약 버전은
-`nh-ad-region-review-input-v10`입니다.
+P1 계약 버전은 `nh-ad-parse-evidence-v6`, P3 계약 버전은
+`nh-ad-region-review-input-v11`입니다. v11은 표 Region의 `table`과 페이지 `tables` 색인을
+더했습니다(자세한 내용은 PIPELINE.md 6절).
 
 P3 Region의 기본 형태는 다음과 같습니다.
 

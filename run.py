@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -95,18 +96,23 @@ def _axis_share(a0: int, a1: int, b0: int, b1: int) -> float:
     return max(0, min(a1, b1) - max(a0, b0)) / max(1, min(a1 - a0, b1 - b0))
 
 
+def _normalize(value) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
+def character_coverage(left: str, right: str) -> float:
+    """OCR 오탈자를 허용하며 left가 right로 얼마나 설명되는지 계산한다."""
+    if not left or not right:
+        return 0.0
+    shared = sum((Counter(left) & Counter(right)).values())
+    return shared / len(left)
+
+
 def _novel_visual_blocks(
     visual: list[dict], structured: list[dict],
 ) -> tuple[list[dict], int]:
     """구조 Region에 이미 표현된 Paddle 블록을 버리고 시각 전용 요소만 남긴다."""
-    normalize = lambda value: "".join(str(value or "").split()).casefold()
-
-    def character_coverage(left: str, right: str) -> float:
-        """OCR 오탈자를 허용하며 left가 right로 얼마나 설명되는지 계산한다."""
-        if not left or not right:
-            return 0.0
-        shared = sum((Counter(left) & Counter(right)).values())
-        return shared / len(left)
+    normalize = _normalize
 
     kept: list[dict] = []
     discarded = 0
@@ -179,10 +185,76 @@ def _novel_visual_blocks(
     return kept, discarded
 
 
+def _alnum(value) -> str:
+    return re.sub(r"[^0-9a-zA-Z가-힣]", "", str(value or "")).casefold()
+
+
+def _structure_lines(structure: dict | None) -> list[str]:
+    """HWP 원본 구조의 문단·칸 문구를 줄 단위로 편다. 띄어쓰기는 원본 그대로다."""
+    lines: list[str] = []
+    for paragraph in (structure or {}).get("paragraphs") or []:
+        lines.extend(str(paragraph.get("text") or "").splitlines())
+    for table in (structure or {}).get("tables") or []:
+        for cell in table.get("cells") or []:
+            lines.extend(str(cell.get("text") or "").splitlines())
+    return list(dict.fromkeys(
+        " ".join(line.split()) for line in lines if len(_alnum(line)) >= 4
+    ))
+
+
+def _structure_text_for(render: str, lines: list[str]) -> str | None:
+    """렌더 글자가 가리키는 원본 줄을 찾는다. 렌더 텍스트층은 화면 줄바꿈대로
+    단어 중간에서도 끊기므로 위치 확인에만 쓰고, 문구는 원본 줄을 쓴다."""
+    target = _alnum(render)
+    if not target:
+        return None
+    picked: list[tuple[int, int, str]] = []
+    for line in sorted(lines, key=lambda value: -len(_alnum(value))):
+        key = _alnum(line)
+        start = target.find(key)
+        if start < 0:
+            continue
+        end = start + len(key)
+        if any(start < b and end > a for a, b, _ in picked):
+            continue
+        picked.append((start, end, line))
+    covered = sum(b - a for a, b, _ in picked)
+    if covered / len(target) < 0.8:
+        return None
+    return "\n".join(line for _, _, line in sorted(picked))
+
+
+def _render_text_inside(bbox: list, digital_lines: list[dict]) -> str:
+    """렌더 PDF 텍스트층에서 블록 안에 중심이 든 줄을 읽기 순서로 잇는다."""
+    x0, y0, x1, y1 = (int(value) for value in bbox)
+    inside = []
+    for line in digital_lines:
+        box = line.get("bbox") or []
+        text = str(line.get("text") or "").strip()
+        if len(box) != 4 or not text:
+            continue
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        if x0 <= cx <= x1 and y0 <= cy <= y1:
+            inside.append((box[1], box[0], text))
+    return "\n".join(text for _, _, text in sorted(inside))
+
+
 def _attach_visual_supplements(
-    visual: list[dict], structured: list[dict],
+    visual: list[dict], structured: list[dict], digital_lines: list[dict] | None = None,
+    structure: dict | None = None,
 ) -> tuple[list[dict], int]:
-    """구조 표 행 안의 신규 시각 문구를 별도 겹침 Region 대신 행 주석으로 합친다."""
+    """구조 표 행 안에서 Paddle이 찾은 새 문구를 HWP 원문으로만 보완한다.
+
+    HWP 구조 행이 놓친 글자(예: 중첩 표 바깥의 각주 문단)는 원본 구조와 렌더 PDF
+    텍스트층에 있다. OCR 문구를 붙이면 오독(`적용요을`)과 중복(`|지점명]…`)이 P3로
+    새므로 쓰지 않는다.
+    - 행 문구가 이미 담은 내용이면 버린다.
+    - 블록 안 렌더 글자로 위치를 확인하고, 그 글자에 맞는 원본 구조 줄을 붙인다.
+      원본 줄을 찾지 못하면 렌더 글자를 붙인다(화면 줄바꿈이 섞일 수 있음).
+    - 렌더 글자가 없으면 이미지 속 글자다. 행에 붙이지 않고 별도 시각 Region으로 남긴다.
+    OCR 문구는 P1 ``visual_supplements``에 위치와 함께 근거로만 남는다.
+    """
+    lines = _structure_lines(structure)
     free: list[dict] = []
     attached = 0
     for block in visual:
@@ -209,15 +281,32 @@ def _attach_visual_supplements(
             free.append(block)
             continue
         _, target = min(candidates, key=lambda item: item[0])
-        target["content"] = f"{str(target.get('content') or '').rstrip()}\n{text}".strip()
-        target["text_source"] = "document_processor_html_with_visual_supplement"
-        table = target.setdefault("table", {})
-        notes = table.setdefault("notes", [])
-        if text not in notes:
-            notes.append(text)
-        target.setdefault("visual_supplements", []).append({
-            "bbox": list(bbox), "text": text, "source": "paddlex_visual",
-        })
+        record = {"bbox": list(bbox), "ocr_text": text, "source": "paddlex_visual"}
+        if character_coverage(_normalize(text), _normalize(target.get("content"))) >= 0.8:
+            record["action"] = "duplicate_dropped"
+            target.setdefault("visual_supplements", []).append(record)
+            attached += 1
+            continue
+        render = _render_text_inside(bbox, digital_lines or [])
+        if not render:
+            record["action"] = "kept_as_image_text"
+            target.setdefault("visual_supplements", []).append(record)
+            free.append(block)
+            continue
+        original = _structure_text_for(render, lines)
+        text, kind = (original, "structure_text") if original else (render, "render_text")
+        record.update(render_text=render, text=text)
+        if _alnum(text) in _alnum(target.get("content")):
+            record["action"] = "duplicate_dropped"
+        else:
+            target["content"] = f"{str(target.get('content') or '').rstrip()}\n{text}".strip()
+            target["text_source"] = f"document_processor_html_with_{kind}"
+            table = target.setdefault("table", {})
+            notes = table.setdefault("notes", [])
+            if text not in notes:
+                notes.append(text)
+            record["action"] = f"{kind}_attached"
+        target.setdefault("visual_supplements", []).append(record)
         attached += 1
     return free, attached
 
@@ -297,7 +386,7 @@ def main() -> None:
                     visual_parsing, page.structured_blocks,
                 )
                 novel, attached = _attach_visual_supplements(
-                    novel, page.structured_blocks,
+                    novel, page.structured_blocks, page.digital_lines, page.hwp_structure,
                 )
                 parsing = [dict(block) for block in page.structured_blocks] + novel
                 merged_parsing += suppressed + attached

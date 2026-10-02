@@ -114,7 +114,7 @@ def test_p3_keeps_one_region_with_plain_label_list_and_no_indexes():
     p3 = export_v2.build_p3(p1)
 
     output = p3["pages"][0]["regions"][0]
-    assert p3["contract"]["version"] == "nh-ad-region-review-input-v10"
+    assert p3["contract"]["version"] == "nh-ad-region-review-input-v11"
     assert output["region_id"] == "p1_r001"
     assert output["selected_text"] == region["text"]
     assert output["labels"] == ["가입대상", "가입금액"]
@@ -206,3 +206,66 @@ def test_explicit_heading_survives_rate_calculation_constraint():
     assert semantic.constrain_rate_calculation_labels(
         region, ["대출기간", "대출금리"],
     ) == ["대출기간", "대출금리"]
+
+
+def test_review_number_is_found_without_vlm_in_real_spellings():
+    # 9/30 전수에서 VLM 이 놓친 표기(12·18 카드상품, 7 카드상품, 5-1 적립식, HWP 073)
+    cases = {
+        "신규대출 기준) [준법감시인 심의필 0000-0000 (0000.00.00~0000.00.00)]":
+            "준법감시인 심의필 0000-0000 (0000.00.00~0000.00.00)",
+        "기준) [여신금융협회 심의필 제 0000-000-00000호 (0000.00.00~0000.00.00)]":
+            "여신금융협회 심의필 제 0000-000-00000호 (0000.00.00~0000.00.00)",
+        "보호합니다. 준법감시인 심의번호 | • 2026-3696(심의일 : 2026. 06. 18.)":
+            "준법감시인 심의번호 | • 2026-3696(심의일 : 2026. 06. 18.)",
+        "* 준법감시인 심의필 : 2026-**** (2026.9.1.~2027.8.31.)":
+            "준법감시인 심의필 : 2026-**** (2026.9.1.~2027.8.31.)",
+        "금융투자협회 심사필 제 26-00000호 · 심의일": "금융투자협회 심사필 제 26-00000호",
+        "2026-0000(심의일 : 2026. 00. 00.) 유효기간": "2026-0000(심의일 : 2026. 00. 00.)",
+    }
+    for text, quote in cases.items():
+        assert semantic.review_number_quote(text) == quote
+    # 번호가 없는 언급은 규칙으로 붙이지 않는다 — VLM 판단에 맡긴다.
+    assert semantic.review_number_quote("광고 심의 결과에 따라 변경될 수 있습니다") is None
+    assert semantic.deterministic_label_evidence(
+        "준법감시인 심의필 2026-0000", ["유의사항"],
+    ) == {}
+
+
+def test_label_quote_survives_truncation_mark_spacing_and_table_markers():
+    source = "■ 계좌에 압류 시 제한 | <br> ■ 준법감시인 심의필 2026-0000(2026.00.00.~0000.00.00.)"
+    result = semantic.validate_labels(
+        {"analysis": "", "region_labels": [{
+            "region_id": "p1_r001", "labels": ["심의번호", "유의사항"],
+            "evidence": [
+                {"label": "심의번호", "quote": "■ 준법감시인 심의필 2026-0000(2026.0…"},
+                {"label": "유의사항", "quote": "계좌에 압류 시 제한"},
+            ],
+            "confidence": 1.0, "reason": "",
+        }]},
+        ["p1_r001"], ["심의번호", "유의사항"], region_texts={"p1_r001": source},
+    )
+
+    assert result["region_labels"][0]["labels"] == ["심의번호", "유의사항"]
+
+
+def test_label_quote_must_still_exist_in_region_text():
+    result = semantic.validate_labels(
+        {"analysis": "", "region_labels": [{
+            "region_id": "p1_r001", "labels": ["심의번호"],
+            "evidence": [{"label": "심의번호", "quote": "준법감시인 심의필 2026-1234"}],
+            "confidence": 1.0, "reason": "",
+        }]},
+        ["p1_r001"], ["심의번호"], region_texts={"p1_r001": "가입대상 개인"},
+    )
+
+    assert result["region_labels"][0]["labels"] == []
+
+
+def test_long_region_prompt_text_keeps_the_tail_where_review_number_lives():
+    text = "유의사항 " * 400 + "준법감시인 심의필 0000-0000"
+
+    shown = semantic._label_text(text)
+
+    assert len(shown) < len(text)
+    assert shown.endswith("준법감시인 심의필 0000-0000")
+    assert "중략" in shown
