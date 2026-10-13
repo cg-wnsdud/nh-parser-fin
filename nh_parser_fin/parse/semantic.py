@@ -338,9 +338,78 @@ def constrain_rate_calculation_labels(region: dict[str, Any], labels: list[str])
 # ── 1단계 · 소유권 ──────────────────────────────────────────────────
 
 
-def _ownership_schema(region_ids: list[str], candidate_ids: list[str]) -> dict[str, Any]:
+def _product_index(product_id: Any) -> int:
+    match = re.fullmatch(r"product_(\d+)", str(product_id or ""))
+    return int(match.group(1)) if match else 0
+
+
+def product_ids_for(known_products: list[dict[str, Any]] | None) -> list[str]:
+    """이번 판정에서 쓸 수 있는 상품 ID. 앞에서 확인된 상품이 없으면 기존 4개 그대로다.
+
+    한 광고가 여러 페이지·파일이면 상품이 4개를 넘을 수 있다(실측: 퇴직연금 광고5
+    8쪽). 이미 쓴 번호 뒤로 새 상품 두 개까지 받을 자리를 둔다.
+    """
+    used = max((_product_index(item.get("product_id")) for item in known_products or []), default=0)
+    return [f"product_{index}" for index in range(1, max(4, used + 2) + 1)]
+
+
+def _owner_ids(product_ids: list[str]) -> list[str]:
+    return ["page_common", *product_ids, "unknown"]
+
+
+def merge_known_products(
+    known_products: list[dict[str, Any]], result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """한 판정 결과에서 실제로 Region·후보를 가진 새 상품을 앞의 목록 뒤에 붙인다.
+
+    이미 있는 ID는 처음 정의를 유지한다. 영역을 하나도 갖지 않은 상품은 넣지 않는다.
+    모델이 products에 빠뜨렸지만 영역에 쓴 ID는 이름 없이라도 자리를 지킨다.
+    """
+    output = [copy.deepcopy(item) for item in known_products]
+    seen = {str(item.get("product_id")) for item in output}
+    used = {
+        str(item.get("product_id"))
+        for item in [*result.get("region_decisions", []), *result.get("recovery_decisions", [])]
+    } - {"page_common", "unknown", ""}
+    described = {str(item.get("product_id")): item for item in result.get("products") or []}
+    for product_id in sorted(used - seen, key=_product_index):
+        output.append(copy.deepcopy(described.get(product_id) or {"product_id": product_id, "name": ""}))
+    return output
+
+
+def _known_products_block(known_products: list[dict[str, Any]], product_ids: list[str]) -> str:
+    """같은 광고의 앞 페이지·구간에서 정한 상품 ID를 다음 판정에 넘긴다.
+
+    판정을 페이지·밴드마다 따로 부르면 모델은 매번 product_1부터 시각적 순서로 다시
+    번호를 매긴다. 실측: `5. 예금성상품(입출식).pdf`(5쪽, 화면 14개, 상품 1개)는 1쪽만
+    상품 하나로 보고 2~5쪽은 화면 열마다 product_1/2/3이 되어 심의 단위가 셋으로 갈렸다.
+    `8. 퇴직연금(광고5).pdf`는 쪽마다 다른 상품이 모두 product_1로 합쳐졌다.
+    """
+    rows = [
+        f"- {item.get('product_id')}: {str(item.get('name') or '').strip() or '이름 미상'}"
+        f" ({item.get('product_group') or '상품군 미상'})"
+        for item in known_products
+    ]
+    new_ids = [value for value in product_ids if value not in {item.get("product_id") for item in known_products}]
+    return "\n".join([
+        "[이미 확인된 상품 — 같은 광고의 앞 페이지·앞 구간에서 정한 ID]",
+        *rows,
+        "이 이미지는 위 상품들과 같은 광고의 다음 부분입니다. 아래 규칙을 1번 규칙보다 우선하세요.",
+        "- 위 상품이 이 이미지에 다시 나오면 반드시 같은 product_id를 쓰세요. 상품명이 다시 보이지 않아도"
+        " 같은 상품의 다른 화면·탭·스크롤 구간이면 같은 상품입니다.",
+        "- 휴대폰 화면이나 웹 캡처가 여러 개 나란히 있어도 화면 하나가 상품 하나는 아닙니다."
+        " 상품명이나 상품 종류가 실제로 다를 때만 다른 상품입니다.",
+        f"- 위 목록에 없는 상품이 분명히 새로 나올 때만 {', '.join(new_ids)} 순서로 새 ID를 쓰세요.",
+    ])
+
+
+def _ownership_schema(
+    region_ids: list[str], candidate_ids: list[str], product_ids: list[str] | None = None,
+) -> dict[str, Any]:
     region_enum = region_ids or ["__none__"]
     candidate_enum = candidate_ids or ["__none__"]
+    product_enum = product_ids or PRODUCT_IDS[1:5]
+    owner_enum = _owner_ids(product_enum)
     return {
         "type": "object",
         "properties": {
@@ -350,7 +419,7 @@ def _ownership_schema(region_ids: list[str], candidate_ids: list[str]) -> dict[s
                 "items": {
                     "type": "object",
                     "properties": {
-                        "product_id": {"type": "string", "enum": PRODUCT_IDS[1:5]},
+                        "product_id": {"type": "string", "enum": product_enum},
                         "name": {"type": "string"},
                         # 상품별 템플릿을 고르려면 상품군과 상품명 노출 여부가
                         # 상품 단위로 필요하다. 문서 단위 분류로는 섞인 문서를
@@ -377,7 +446,7 @@ def _ownership_schema(region_ids: list[str], candidate_ids: list[str]) -> dict[s
                     "type": "object",
                     "properties": {
                         "region_id": {"type": "string", "enum": region_enum},
-                        "product_id": {"type": "string", "enum": PRODUCT_IDS},
+                        "product_id": {"type": "string", "enum": owner_enum},
                         "confidence": {"type": "number"},
                         # Region마다 자유 서술 reason을 받으면 응답의 대부분이
                         # 거기에 들어간다. 실측: Region 30개 페이지에서 응답이
@@ -398,7 +467,7 @@ def _ownership_schema(region_ids: list[str], candidate_ids: list[str]) -> dict[s
                         "candidate_id": {"type": "string", "enum": candidate_enum},
                         "action": {"type": "string", "enum": ACTIONS},
                         "target_region_id": {"type": "string", "enum": ["", *region_ids]},
-                        "product_id": {"type": "string", "enum": PRODUCT_IDS},
+                        "product_id": {"type": "string", "enum": owner_enum},
                         "confidence": {"type": "number"},
                         "reason": {"type": "string"},
                     },
@@ -480,11 +549,19 @@ def analyze_page_ownership(
     *,
     crop_offset: tuple[int, int] = (0, 0),
     band_note: str = "페이지 전체",
+    known_products: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """상품 소유권과 복구 후보 처리를 판정한다. 라벨은 여기서 붙이지 않는다."""
+    """상품 소유권과 복구 후보 처리를 판정한다. 라벨은 여기서 붙이지 않는다.
+
+    `known_products`가 비어 있으면 프롬프트와 스키마가 이전과 한 글자도 같다.
+    """
     regions = page["regions"]
     region_ids = [str(region["region_id"]) for region in regions]
     candidate_ids = [str(candidate["candidate_id"]) for candidate in candidates]
+    product_ids = product_ids_for(known_products) if known_products else None
+    known_note = (
+        f"\n{_known_products_block(known_products, product_ids)}\n" if known_products else ""
+    )
     prompt = f"""당신은 농협 금융광고 페이지 구조 판독기입니다.
 
 이미지의 파란 박스는 기존 PaddleX Region이고 주황 박스는 OCR/PDF 줄로 만든 복구 후보입니다.
@@ -515,7 +592,7 @@ def analyze_page_ownership(
 - 다른 상품의 내용을 같은 product_id에 섞지 마세요.
 - 표·고지·상품 설명이라는 PaddleX layout 이름은 힌트일 뿐 정답으로 믿지 마세요.
 - 원문에 없는 문구를 추측하지 마세요.
-
+{known_note}
 페이지 크기: {page['canvas']}
 현재 이미지 범위: {band_note}
 {_listing(regions, candidates)}
@@ -529,13 +606,13 @@ def analyze_page_ownership(
             ),
         ],
         schema_name="parser_v2_page_ownership",
-        schema=_ownership_schema(region_ids, candidate_ids),
+        schema=_ownership_schema(region_ids, candidate_ids, product_ids),
         # 한글은 토큰당 글자 수가 적어 영문 기준 예산으로 잡으면 잘린다. 실측:
         # `4. 카드상품`(Region 30 + 후보 2)의 응답이 14,827자였고 5,360토큰
         # 예산에서 잘려 JSON 파싱이 3회 모두 실패했다.
         max_tokens=min(10000, 1500 + 160 * len(region_ids) + 320 * len(candidate_ids)),
     )
-    return validate_ownership(result, region_ids, candidate_ids)
+    return validate_ownership(result, region_ids, candidate_ids, product_ids)
 
 
 def _center(item: dict[str, Any], axis: str) -> float:
@@ -593,11 +670,17 @@ def analyze_page_context(
     image: Image.Image,
     page: dict[str, Any],
     candidates: list[dict[str, Any]],
+    known_products: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """일반 페이지는 1회, 긴 페이지는 2~4개 밴드로 소유권 판정을 수행한다."""
+    """일반 페이지는 1회, 긴 페이지는 2~4개 밴드로 소유권 판정을 수행한다.
+
+    `known_products`는 같은 문서의 앞 페이지에서 확인된 상품이다. 밴드끼리도 앞
+    밴드에서 확인된 상품을 다음 밴드에 넘겨 같은 상품이 같은 ID를 갖게 한다.
+    """
+    known = list(known_products or [])
     bands = partition_for_semantic_bands(page, candidates)
     if not bands:
-        result = analyze_page_ownership(image, page, candidates)
+        result = analyze_page_ownership(image, page, candidates, known_products=known)
         result["semantic_bands"] = [{"index": 1, "count": 1, "mode": "whole"}]
         return result
 
@@ -611,10 +694,13 @@ def analyze_page_context(
         "semantic_bands": [],
     }
     products: dict[str, dict[str, Any]] = {}
+    allowed: set[str] = set(PRODUCT_IDS[1:5])
     width, height = (int(value) for value in page["canvas"])
     for band in bands:
         x0, y0, x1, y1 = band["crop"]
         cropped = image.crop((x0, y0, x1, y1))
+        if known:
+            allowed.update(product_ids_for(known))
         result = analyze_page_ownership(
             cropped,
             {**page, "regions": band["regions"]},
@@ -624,7 +710,9 @@ def analyze_page_context(
                 f"긴 페이지 {band['axis']}축 band {band['index']}/{band['count']}, "
                 f"원본 crop={band['crop']}. product_1은 문서 전체에서 같은 상품 ID입니다."
             ),
+            known_products=known,
         )
+        known = merge_known_products(known, result)
         combined["analysis"] += (
             ("\n" if combined["analysis"] else "")
             + f"band {band['index']}: {result.get('analysis') or ''}"
@@ -661,6 +749,7 @@ def analyze_page_context(
         combined,
         [str(region["region_id"]) for region in page["regions"]],
         [str(candidate["candidate_id"]) for candidate in candidates],
+        sorted(allowed, key=_product_index),
     )
     validated["semantic_bands"] = combined["semantic_bands"]
     return validated
@@ -670,8 +759,10 @@ def validate_ownership(
     result: dict[str, Any],
     region_ids: list[str],
     candidate_ids: list[str],
+    product_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """모르는 ID·중복을 버리고 누락 ID는 검수 대상으로 보충한다."""
+    owners = _owner_ids(product_ids) if product_ids else PRODUCT_IDS
 
     def unique(items: list[dict[str, Any]], key: str, known: set[str]) -> dict[str, dict[str, Any]]:
         output = {}
@@ -705,7 +796,7 @@ def validate_ownership(
             "reason": "VLM 응답에서 누락되어 검수 필요",
         })
     for item in [*region_map.values(), *candidate_map.values()]:
-        if item.get("product_id") not in PRODUCT_IDS:
+        if item.get("product_id") not in owners:
             item["product_id"] = "unknown"
     return {
         "analysis": str(result.get("analysis") or ""),

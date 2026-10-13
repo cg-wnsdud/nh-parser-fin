@@ -131,7 +131,7 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
             if item["kind"] == "table" and region.get("table_view"):
                 item["table"] = copy.deepcopy(region["table_view"])
             regions_out.append(item)
-        pages_out.append({
+        page_out = {
             "page_no": int(page["page_no"]),
             # bbox를 화면 좌표로 환산하는 데 필요한 최소 메타데이터다.
             "canvas": copy.deepcopy(page.get("canvas")),
@@ -140,7 +140,14 @@ def build_p3(evidence: dict[str, Any]) -> dict[str, Any]:
                 table for table in copy.deepcopy(page.get("tables") or [])
                 if any(region_id in kept_ids for region_id in table.get("region_ids") or [])
             ],
-        })
+        }
+        if page.get("source_page_no") is not None:
+            # 여러 파일을 묶은 광고에서만 싣는다. page_no는 광고 전체에서 이어 붙인
+            # 번호이고, 이 둘이 원본 파일과 그 파일 안의 쪽이다. 심의 쪽 화면 투영이
+            # 같은 이름으로 읽는다. 파일 하나짜리 P3에는 넣지 않는다.
+            page_out["source_file"] = page.get("source_file")
+            page_out["source_page_no"] = int(page["source_page_no"])
+        pages_out.append(page_out)
 
     return {
         "contract": {

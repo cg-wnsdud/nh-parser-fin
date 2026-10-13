@@ -53,7 +53,14 @@ def _args() -> argparse.Namespace:
         "--template-id", default=None,
         help="사용자가 지정한 광고 템플릿 ID. 주면 모든 상품에 이 템플릿을 쓰고, 없으면 상품별로 자동 선택",
     )
+    parser.add_argument(
+        "--ad-group", default=None, metavar="광고이름",
+        help="입력 파일 전체를 광고 1건으로 묶어 문서 하나(P1/P3 한 쌍)로 만든다. "
+             "페이지는 입력 순서대로 이어 번호를 매기고 각 페이지에 원본 파일과 쪽 번호를 남긴다",
+    )
     args = parser.parse_args()
+    if args.ad_group is not None and not _safe(args.ad_group).strip("_"):
+        parser.error("--ad-group 이름에 파일 이름으로 쓸 수 있는 글자가 없습니다")
     if args.template_id is not None:
         from nh_parser_fin.review.catalog import load_catalog
 
@@ -90,6 +97,12 @@ def _digital_lines(pdf, page_no: int, origin: dict, supplied: list[dict] | None 
 
     px_per_pt = float(origin.get("dpi_used") or 200) / 72.0
     return [line.model_dump(mode="json") for line in extract_digital_lines(pdf[page_no - 1], px_per_pt)]
+
+
+def _group_file_type(sources: list[Path]) -> str:
+    """묶은 광고의 파일 형식. 모두 같으면 그 형식, 섞이면 mixed."""
+    kinds = {source.suffix.lower().lstrip(".") for source in sources}
+    return kinds.pop() if len(kinds) == 1 else "mixed"
 
 
 def _axis_share(a0: int, a1: int, b0: int, b1: int) -> float:
@@ -325,6 +338,10 @@ def main() -> None:
         "empty", "unassigned_line",
     ]
 
+    # --ad-group: 여러 파일이 광고 한 건이다. 문서 하나로 모으고 쪽 번호를 이어 붙인다.
+    ad_group = args.ad_group
+    group_source = " + ".join(source.name for source in sources) if ad_group else None
+    group_pages: list[dict] = []
     for source in sources:
         pdf = None
         if source.suffix.lower() == ".pdf":
@@ -332,7 +349,10 @@ def main() -> None:
             pdf = pdfium.PdfDocument(str(source))
         page_outputs = []
         for page in load_pages(source, sizing=args.sizing, max_side=args.max_side):
-            key = f"{_safe(page.doc_id)}__p{page.page_no:03d}"
+            source_page_no = page.page_no
+            if ad_group:
+                page.page_no = len(group_pages) + len(page_outputs) + 1
+            key = f"{_safe(ad_group or page.doc_id)}__p{page.page_no:03d}"
             det, parsing, visual_parsing, lines = [], [], [], []
             call_seconds = 0.0
             if page.structured_route == "structured_fast":
@@ -394,7 +414,7 @@ def main() -> None:
                 parsing = visual_parsing
 
             digital = _digital_lines(
-                pdf, page.page_no, page.origin,
+                pdf, source_page_no, page.origin,
                 page.digital_lines or None,
             )
             # 조각 오프셋까지 적용된 **페이지 좌표** 박스를 남긴다. `replay.py` 가
@@ -454,6 +474,8 @@ def main() -> None:
                 },
                 "raw_observations": {"layout_det_res": det, "parsing_res_list": parsing},
             })
+            if ad_group:
+                evidence["source_page_no"] = source_page_no
             if page.hwp_structure is not None:
                 evidence["hwp_structure"] = page.hwp_structure
             if not args.compact_output:
@@ -484,7 +506,8 @@ def main() -> None:
             tasks.append({
                 "data": {
                     "image": f"/data/local-files/?d=pages/{media_name}",
-                    "source_file": page.source_file,
+                    # 페이지 그림은 문서 이름 + 문서 쪽 번호로 찾는다(pipeline·report).
+                    "source_file": group_source or page.source_file,
                     "page_no": page.page_no,
                     "run_name": args.run_name,
                 },
@@ -519,11 +542,22 @@ def main() -> None:
                 decision = "통짜"
             else:
                 decision = f"{tile_note['pieces']}조각"
+            where = f"p{page.page_no}" + (f"(원본 p{source_page_no})" if ad_group else "")
             print(
-                f"· {page.source_file} p{page.page_no}: {decision}, "
+                f"· {page.source_file} {where}: {decision}, "
                 f"Region {len(evidence['regions'])}, 미배정 {len(evidence['unassigned_lines'])}"
             )
-        documents.append({"source_file": source.name, "pages": page_outputs})
+        if ad_group:
+            group_pages.extend(page_outputs)
+        else:
+            documents.append({"source_file": source.name, "pages": page_outputs})
+    if ad_group:
+        documents.append({
+            "source_file": group_source,
+            "doc_id": ad_group,
+            "file_type": _group_file_type(sources),
+            "pages": group_pages,
+        })
 
     manifest = {
         "run_name": args.run_name,

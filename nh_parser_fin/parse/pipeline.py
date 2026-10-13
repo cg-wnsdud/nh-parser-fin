@@ -34,6 +34,7 @@ from .semantic import (
     constrain_rate_calculation_labels,
     deterministic_label_evidence,
     explicit_heading_evidence,
+    merge_known_products,
 )
 from .templates import (
     PAGE_COMMON,
@@ -571,9 +572,10 @@ def run_full_pipeline(
         first_image = Image.open(media[(source_file, int(pages[0]["page_no"]))]).convert("RGB")
         classification = vlm_client.classify(first_image, source_file)
         doc = {
-            "doc_id": Path(source_file).stem,
+            # 여러 파일을 묶은 광고는 run.py가 doc_id·file_type을 정해 넘긴다.
+            "doc_id": raw_document.get("doc_id") or Path(source_file).stem,
             "source_file": source_file,
-            "file_type": Path(source_file).suffix.lower().lstrip("."),
+            "file_type": raw_document.get("file_type") or Path(source_file).suffix.lower().lstrip("."),
             "product_group": classification.product_group,
             "ad_type": classification.ad_type,
             "product_name_shown": classification.product_name_shown,
@@ -589,10 +591,16 @@ def run_full_pipeline(
             ).convert("RGB")
             for page in pages
         }
+        # 페이지마다 따로 판정하면 매번 product_1부터 다시 번호가 붙는다. 앞 페이지에서
+        # 확인된 상품을 넘겨 같은 상품은 문서 전체에서 같은 ID를 갖게 한다. 첫 페이지는
+        # 넘길 상품이 없으므로 판정 요청이 이전과 같다.
+        known_products: list[dict[str, Any]] = []
         for page in pages:
             result = analyze_page_context(
                 images[int(page["page_no"])], page, page["recovery_candidates"],
+                known_products=known_products,
             )
+            known_products = merge_known_products(known_products, result)
             _apply_ownership(page, result)
             # 표 구조는 라벨링보다 먼저 복원한다. 라벨러가 셀 낱개가 아니라
             # 표 하나를 보게 해야 구분값을 한 번만 붙인다.
@@ -635,7 +643,10 @@ def run_full_pipeline(
         p3 = build_p3(p1)
         p1_documents.append(p1)
         p3_documents.append(p3)
-        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in source_file)
+        # 파일 하나짜리는 원본 파일명 그대로(심의 쪽이 이 이름으로 결과를 찾는다).
+        # 여러 파일을 묶은 광고는 이어 붙인 이름이 경로 길이를 넘기므로 광고 이름을 쓴다.
+        stem = raw_document.get("doc_id") or source_file
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)
         final_dir = out / "final"
         final_dir.mkdir(parents=True, exist_ok=True)
         _write_json(final_dir / f"{safe}.p1.json", p1)

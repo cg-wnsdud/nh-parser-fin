@@ -265,7 +265,14 @@ def build(run: Path, title: str) -> str:
                 continue
             uri, width, height = _thumb(image_path)
             label = html.escape(source_file)
-            if len(document["pages"]) > 1:
+            if page.get("source_file"):
+                # 여러 파일을 묶은 광고: 탭에는 그 쪽의 원본 파일을 보인다.
+                label = (
+                    f"{html.escape(str(document['document'].get('doc_id') or ''))} "
+                    f"<small>p{page_no} · {html.escape(str(page['source_file']))}"
+                    f" p{page.get('source_page_no')}</small>"
+                )
+            elif len(document["pages"]) > 1:
                 label += f" <small>p{page_no}</small>"
             tabs.append(
                 f"<button class='tab' data-key='{key}'>{label}</button>"

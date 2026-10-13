@@ -229,6 +229,26 @@ uv run python replay.py --from full-check-debug --run-name replay-check
 영역에 그 템플릿의 구분값을 씁니다. P1 `template`·`product_templates`와 P3 `document.template`에는
 `source: "user_provided"`로 기록됩니다. 지정하지 않으면 기존처럼 상품마다 자동 선택합니다.
 
+한 광고가 여러 파일(탭별·스크롤 캡처, 포스터와 유의사항 분리 등)이면 `--ad-group <광고이름>`으로
+**광고 1건 = 문서 하나(P1/P3 한 쌍)** 로 묶습니다. 심의 앱이 광고 카드 하나에 첨부한 파일을 한
+폴더에 넣어 부르는 경우입니다.
+
+```bash
+uv run python run.py --run-name ad-001 --compact-output --input "<광고 폴더>" \
+  --template-id "예금성상품-적립식" --ad-group "광고1"
+```
+
+- 페이지는 입력 순서(폴더면 파일 이름순)대로 1..N으로 이어 번호를 매깁니다. 그래서 `pN_rNNN`이
+  광고 안에서 그대로 유일합니다.
+- 묶은 문서에서만 P3 페이지에 `source_file`(원본 파일명)과 `source_page_no`(그 파일 안의 쪽)를
+  싣습니다. 파일 하나짜리 P3에는 이 두 필드가 없고 이전과 같습니다.
+- 문서 `doc_id`는 광고이름, `source_file`은 `a.png + b.png`, `file_type`은 파일 형식이 모두 같으면
+  그 형식이고 섞이면 `mixed`입니다. 결과 파일은 `final/<광고이름>.p3.json`입니다.
+
+상품 소유권은 페이지(긴 페이지는 밴드)마다 판정하되, 앞에서 확인된 상품 목록을 다음 판정에
+넘깁니다. 같은 상품의 다른 화면·탭·파일은 같은 `product_id`가 되고 새 상품만 다음 번호를 받습니다.
+첫 판정은 넘길 상품이 없어 요청이 이전과 같습니다.
+
 `--compact-output`의 최종 파일은 다음 위치에 생성됩니다. 여러 입력을 한 번에 실행하면
 `report.html`에서 모든 파일의 P3 영역과 페이지 이미지를 함께 확인할 수 있습니다.
 
@@ -258,6 +278,10 @@ P3의 `pages[].regions[]`가 심의의 기본 근거입니다.
 | `kind` | `text` 또는 `table` |
 | `needs_review` | 파싱 품질상 원문 대조가 필요한지 여부 |
 | `text_source` | 최종 텍스트 출처. `hwp`, `digital`, `ocr`, `vlm` 중 하나 |
+
+`--ad-group`으로 묶은 문서의 `pages[]`에는 `source_file`, `source_page_no`가 더 있습니다.
+`page_no`는 광고 전체에서 이어지는 번호이고, 원본 화면 위 하이라이트는 이 두 값으로 원본 파일과
+쪽을 찾습니다.
 
 `needs_review`는 광고의 위반 여부가 아닙니다. OCR/VLM 불일치, 낮은 판독
 확신도 같은 **파싱 품질 신호**입니다. 구체적인 사유는 같은 `region_id`의 P1
